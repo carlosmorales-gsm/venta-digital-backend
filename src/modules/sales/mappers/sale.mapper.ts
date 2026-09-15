@@ -181,6 +181,7 @@ export function saleToListItem(sale: Sale) {
     status: sale.status,
     amount: Number(sale.amount) || 0,
     titularName: sale.titularName,
+    contrato: realContrato(sale.contrato),
     odooPartnerId: sale.odooPartnerId ?? null,
     odooSaleOrderId: sale.odooSaleOrderId ?? null,
     odooReceptionSynced: sale.odooReceptionSynced,
