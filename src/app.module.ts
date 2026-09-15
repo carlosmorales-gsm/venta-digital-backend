@@ -26,6 +26,7 @@ import { DiscountGrant } from './modules/discounts/entities/discount-grant.entit
 import { SellerDefault } from './modules/users/entities/seller-default.entity';
 import { SellerDefaultPlan } from './modules/users/entities/seller-default-plan.entity';
 import { TruncatingTypeOrmLogger } from './database/truncating-typeorm.logger';
+import { postgresSsl } from './database/postgres-ssl';
 
 @Module({
   imports: [
@@ -33,7 +34,7 @@ import { TruncatingTypeOrmLogger } from './database/truncating-typeorm.logger';
       isGlobal: true,
       envFilePath: '.env',
     }),
-    TypeOrmModule.forRootAsync({ 
+    TypeOrmModule.forRootAsync({
       imports: [ConfigModule],
       inject: [ConfigService],
       useFactory: (config: ConfigService) => ({
@@ -43,23 +44,11 @@ import { TruncatingTypeOrmLogger } from './database/truncating-typeorm.logger';
         username: config.get<string>('DB_USR'),
         password: config.get<string>('DB_PSW'),
         database: config.get<string>('DB_NAME'),
-        entities: [
-          User,
-          Permission,
-          UserPermission,
-          RefreshToken,
-          AuditLog,
-          Sale,
-          SaleHolder,
-          SaleSecondContact,
-          SaleSubstituteHolder,
-          SaleBeneficiary,
-          SaleDocument,
-          AppSettings,
-          DiscountGrant,
-          SellerDefault,
-          SellerDefaultPlan,
-        ],
+        ssl: postgresSsl(
+          config.get<string>('DB_HOST'),
+          config.get<string>('DB_SSL'),
+        ),
+        entities: [User, Permission, UserPermission, RefreshToken, AuditLog, Sale, SaleHolder, SaleSecondContact, SaleSubstituteHolder, SaleBeneficiary, SaleDocument, AppSettings, DiscountGrant, SellerDefault, SellerDefaultPlan,],
         // Solo beta: crea/ajusta esquema de esta BD. No usar en producción.
         synchronize: config.get<string>('DB_SYNC') === 'true',
         logging: config.get<string>('DB_LOGGING') === 'true',
@@ -80,4 +69,4 @@ import { TruncatingTypeOrmLogger } from './database/truncating-typeorm.logger';
     NotificationsModule,
   ],
 })
-export class AppModule {}
+export class AppModule { }

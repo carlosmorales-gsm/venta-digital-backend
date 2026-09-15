@@ -16,6 +16,7 @@ import {
   DEFAULT_ADMIN_PERMISSIONS,
   PERMISSION_CATALOG,
 } from '../../common/constants/permissions.constants';
+import { postgresSsl } from '../postgres-ssl';
 
 async function run() {
   const ds = new DataSource({
@@ -25,6 +26,7 @@ async function run() {
     username: process.env.DB_USR,
     password: process.env.DB_PSW,
     database: process.env.DB_NAME,
+    ssl: postgresSsl(process.env.DB_HOST, process.env.DB_SSL),
     entities: [User, Permission, UserPermission, RefreshToken],
     synchronize: process.env.DB_SYNC === 'true',
   });
