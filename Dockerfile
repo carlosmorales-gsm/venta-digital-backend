@@ -5,7 +5,7 @@ FROM node:20-alpine AS builder
 WORKDIR /app
 
 COPY package.json package-lock.json ./
-RUN npm ci
+RUN npm ci --include=dev
 
 COPY nest-cli.json tsconfig.json tsconfig.build.json ./
 COPY src ./src
