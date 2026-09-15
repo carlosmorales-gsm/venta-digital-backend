@@ -15,6 +15,7 @@ const PEOPLE = {
 
 const LIST_STATUSES = [
   SaleStatus.COMPLETED,
+  SaleStatus.PENDING_VALIDATION,
   SaleStatus.PENDING_SIGNATURE,
   SaleStatus.PENDING_PAYMENT,
   SaleStatus.REJECTED,
@@ -22,6 +23,7 @@ const LIST_STATUSES = [
 
 const CONCILIATION_STATUSES = [
   SaleStatus.COMPLETED,
+  SaleStatus.PENDING_VALIDATION,
   SaleStatus.PENDING_SIGNATURE,
   SaleStatus.PENDING_PAYMENT,
 ];

@@ -41,7 +41,7 @@ import { assertMxPhone } from './utils/phone';
 import { SaleDocument } from './entities/sale-document.entity';
 import { SettingsService } from '../settings/settings.service';
 import { DiscountsService } from '../discounts/discounts.service';
-import { OdooGsmClient } from '../odoo/odoo-gsm.client';
+import { OdooGsmClient, type OdooVdReceptionLink } from '../odoo/odoo-gsm.client';
 import { PlanKind } from './enums/plan-kind.enum';
 import { CONTRATO_STAMPS, stampTextOnPdf } from './utils/stamp-caratula-contrato';
 import { formatDigitalFolio } from './utils/digital-folio';
@@ -168,6 +168,101 @@ export class SalesService {
         `Venta #${saleId}: no se pudo sincronizar expediente Odoo — ${msg}`,
       );
       return { synced: false, error: msg };
+    }
+  }
+
+  private hasOdooValidationIds(sale: Sale): boolean {
+    return Number(sale.odooPartnerId) > 0 && Number(sale.odooSaleOrderId) > 0;
+  }
+
+  private isSignedPipeline(sale: Sale): boolean {
+    return (
+      sale.status === SaleStatus.COMPLETED ||
+      sale.status === SaleStatus.PENDING_VALIDATION
+    );
+  }
+
+  private signedStatusFor(sale: Sale): SaleStatus {
+    return this.hasOdooValidationIds(sale)
+      ? SaleStatus.COMPLETED
+      : SaleStatus.PENDING_VALIDATION;
+  }
+
+  private applySignedStatus(sale: Sale): boolean {
+    if (!this.isSignedPipeline(sale)) return false;
+    const next = this.signedStatusFor(sale);
+    if (sale.status === next) return false;
+    sale.status = next;
+    return true;
+  }
+
+  private saleNeedsOdooLinkPull(sale: Sale): boolean {
+    return this.isSignedPipeline(sale) && !this.hasOdooValidationIds(sale);
+  }
+
+  private applyOdooReceptionLink(
+    sale: Sale,
+    link: Partial<OdooVdReceptionLink> | null | undefined,
+  ) {
+    if (!link) return;
+    const partnerId = Number(link.partnerId) || 0;
+    const saleOrderId = Number(link.saleOrderId) || 0;
+    const contrato = String(link.contrato || '').trim();
+    if (!(Number(sale.odooPartnerId) > 0) && partnerId > 0) {
+      sale.odooPartnerId = partnerId;
+    }
+    if (
+      !(Number(sale.odooSaleOrderId) > 0) &&
+      saleOrderId > 0 &&
+      Number(sale.odooPartnerId) > 0
+    ) {
+      sale.odooSaleOrderId = saleOrderId;
+      if (contrato) sale.contrato = contrato;
+    }
+  }
+
+  /**
+   * Al abrir la sesión del vendedor: si Mesa ya asoció cliente/cotización
+   * y Nest no se enteró (botón oculto en Odoo), copia esos IDs.
+   */
+  private async pullOdooLinksIfMissing(sales: Sale[]) {
+    const pending = sales.filter((sale) => this.saleNeedsOdooLinkPull(sale));
+    if (!pending.length) return;
+    let links: OdooVdReceptionLink[] = [];
+    try {
+      links = await this.odooGsm.getVdReceptionLinks(pending.map((sale) => sale.id));
+    } catch (e) {
+      this.logger.warn(
+        `No se pudieron leer enlaces Odoo: ${(e as Error).message}`,
+      );
+      return;
+    }
+    if (!links.length) return;
+    const byId = new Map(links.map((link) => [link.vdSaleId, link]));
+    for (const sale of pending) {
+      const link = byId.get(sale.id);
+      if (!link) continue;
+      const beforePartner = sale.odooPartnerId;
+      const beforeOrder = sale.odooSaleOrderId;
+      this.applyOdooReceptionLink(sale, link);
+      const statusChanged = this.applySignedStatus(sale);
+      if (
+        sale.odooPartnerId !== beforePartner ||
+        sale.odooSaleOrderId !== beforeOrder ||
+        statusChanged
+      ) {
+        await this.salesRepository.saveWithoutDocuments(sale);
+        this.logger.log(
+          `Venta #${sale.id}: sincronizados IDs Odoo (partner=${sale.odooPartnerId ?? 0}, quote=${sale.odooSaleOrderId ?? 0}, status=${sale.status})`,
+        );
+      }
+    }
+  }
+
+  private async refreshSignedStatuses(sales: Sale[]) {
+    for (const sale of sales) {
+      if (!this.applySignedStatus(sale)) continue;
+      await this.salesRepository.saveWithoutDocuments(sale);
     }
   }
 
@@ -354,6 +449,8 @@ export class SalesService {
   async listOwnSales(sellerId: number) {
     await this.purgeExpired();
     const items = await this.salesRepository.findSummariesBySellerId(sellerId);
+    await this.pullOdooLinksIfMissing(items);
+    await this.refreshSignedStatuses(items);
     const now = Date.now();
     const visible = items.filter((s) => {
       if (s.status === SaleStatus.DRAFT) {
@@ -385,6 +482,8 @@ export class SalesService {
   async listAllSales() {
     await this.purgeExpired();
     const items = await this.salesRepository.findForMonitor();
+    await this.pullOdooLinksIfMissing(items);
+    await this.refreshSignedStatuses(items);
     return {
       scope: 'all' as const,
       items: items.map(saleToListItem),
@@ -400,6 +499,7 @@ export class SalesService {
   async listForConciliation() {
     await this.purgeExpired();
     const items = await this.salesRepository.findForConciliation();
+    await this.refreshSignedStatuses(items);
     return {
       scope: 'conciliation' as const,
       total: items.length,
@@ -542,10 +642,12 @@ export class SalesService {
     const sale = await this.salesRepository.findById(id);
     if (!sale) throw new NotFoundException('Venta no encontrada');
     sale.odooPartnerId = odooPartnerId;
+    this.applySignedStatus(sale);
     await this.salesRepository.saveWithoutDocuments(sale);
     return {
       id: sale.id,
       odooPartnerId: sale.odooPartnerId,
+      status: sale.status,
     };
   }
 
@@ -573,10 +675,11 @@ export class SalesService {
     if (
       sale.status !== SaleStatus.PENDING_PAYMENT &&
       sale.status !== SaleStatus.PENDING_SIGNATURE &&
+      sale.status !== SaleStatus.PENDING_VALIDATION &&
       sale.status !== SaleStatus.COMPLETED
     ) {
       throw new BadRequestException(
-        'Solo se pueden cancelar ventas pendientes de pago, de firma o completadas',
+        'Solo se pueden cancelar ventas pendientes de pago, de firma, de validación o completadas',
       );
     }
 
@@ -639,6 +742,7 @@ export class SalesService {
     const previousOrderId = sale.odooSaleOrderId;
     sale.odooSaleOrderId = null;
     sale.contrato = '';
+    this.applySignedStatus(sale);
     await this.salesRepository.saveWithoutDocuments(sale);
 
     const titular =
@@ -701,6 +805,7 @@ export class SalesService {
     if (quoteName) {
       sale.contrato = quoteName;
     }
+    this.applySignedStatus(sale);
     await this.salesRepository.saveWithoutDocuments(sale);
     if (quoteName) {
       await this.refreshContratoOnDriveDocuments(sale, quoteName);
@@ -709,6 +814,7 @@ export class SalesService {
       id: sale.id,
       odooSaleOrderId: sale.odooSaleOrderId,
       contrato: sale.contrato,
+      status: sale.status,
     };
   }
 
@@ -1152,7 +1258,10 @@ export class SalesService {
     const sale = await this.salesRepository.findByIdWithFiles(id);
     if (!sale) throw new NotFoundException('Venta no encontrada');
     this.assertSellerOwns(sale, user.userId);
-    if (sale.status === SaleStatus.COMPLETED) {
+    if (
+      sale.status === SaleStatus.COMPLETED ||
+      sale.status === SaleStatus.PENDING_VALIDATION
+    ) {
       return {
         ...saleToPublic(sale),
         odooSyncError: null,
@@ -1428,7 +1537,7 @@ export class SalesService {
         sale.driveFolderId = driveInfo.folderId;
         sale.driveFolderUrl = driveInfo.folderUrl;
         sale.driveFolderPath = driveInfo.folderName;
-        sale.status = SaleStatus.COMPLETED;
+        sale.status = this.signedStatusFor(sale);
         await this.salesRepository.save(sale);
         this.logger.log(
           `Firma venta #${sale.id}: Drive OK (${driveInfo.files.length} archivos)`,
@@ -1445,7 +1554,7 @@ export class SalesService {
     } else {
       // Sin Drive: se conserva base64 (entorno local / no configurado)
       sale.documents = docs;
-      sale.status = SaleStatus.COMPLETED;
+      sale.status = this.signedStatusFor(sale);
       await this.salesRepository.save(sale);
     }
 

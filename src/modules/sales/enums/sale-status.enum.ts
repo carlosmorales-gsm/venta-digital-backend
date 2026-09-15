@@ -5,7 +5,9 @@ export enum SaleStatus {
   PENDING_PAYMENT = 'PENDING_PAYMENT',
   /** Pago registrado; falta firma del titular. */
   PENDING_SIGNATURE = 'PENDING_SIGNATURE',
-  /** Venta completa (firmada). */
+  /** Firmada; falta cliente y/o cotización de Odoo. */
+  PENDING_VALIDATION = 'PENDING_VALIDATION',
+  /** Firmada y con cliente + cotización Odoo. */
   COMPLETED = 'COMPLETED',
   /** Rechazada desde Odoo (sin cotización vinculada). */
   REJECTED = 'REJECTED',

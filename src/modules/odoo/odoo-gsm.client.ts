@@ -111,6 +111,14 @@ export type OdooReserveSpaceResult = {
   alreadyReserved?: boolean;
 };
 
+/** Cliente/cotización ya persistidos en el expediente virtual de Odoo. */
+export type OdooVdReceptionLink = {
+  vdSaleId: number;
+  partnerId: number;
+  saleOrderId: number;
+  contrato: string;
+};
+
 @Injectable()
 export class OdooGsmClient {
   private readonly logger = new Logger(OdooGsmClient.name);
@@ -546,6 +554,40 @@ export class OdooGsmClient {
       throw new ServiceUnavailableException(
         typeof msg === 'string' ? msg : 'No se pudo apartar la ubicación en Odoo',
       );
+    }
+  }
+
+  /**
+   * Ventas firmadas sin id de cliente/cotización: api-odoo-gsm lee el
+   * expediente y, si Mesa ya asoció, Nest copia esos IDs.
+   */
+  async getVdReceptionLinks(
+    vdSaleIds: number[],
+  ): Promise<OdooVdReceptionLink[]> {
+    if (!this.http) return [];
+    const ids = [
+      ...new Set(vdSaleIds.filter((id) => Number.isFinite(id) && id > 0)),
+    ];
+    if (!ids.length) return [];
+    try {
+      const { data } = await this.http.get<{ items?: OdooVdReceptionLink[] }>(
+        '/expedientes/venta-digital/enlaces',
+        { params: { ids: ids.join(',') }, timeout: 8000 },
+      );
+      const rows = Array.isArray(data) ? data : data?.items ?? [];
+      return rows
+        .map((row) => ({
+          vdSaleId: Number(row.vdSaleId) || 0,
+          partnerId: Number(row.partnerId) || 0,
+          saleOrderId: Number(row.saleOrderId) || 0,
+          contrato: String(row.contrato || ''),
+        }))
+        .filter((row) => row.vdSaleId > 0);
+    } catch (e: any) {
+      this.logger.warn(
+        `getVdReceptionLinks: ${e?.response?.data?.message || e?.message}`,
+      );
+      return [];
     }
   }
 }
