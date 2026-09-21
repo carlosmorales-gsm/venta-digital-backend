@@ -44,6 +44,7 @@ export class UsersService implements OnModuleInit {
   /** Al arrancar: siembra permisos y admin inicial si hace falta. */
   async onModuleInit() {
     await this.seedPermissions();
+    await this.usersRepository.uppercaseExistingUsernames();
     await this.seedAdminIfNeeded();
   }
 
@@ -77,6 +78,7 @@ export class UsersService implements OnModuleInit {
         fullName,
         username,
         password,
+        mustChangePassword: false,
       },
       null,
     );
@@ -95,7 +97,7 @@ export class UsersService implements OnModuleInit {
       await this.assertSellerCellphoneAvailable(cellphone as string);
     } else {
       const exists = await this.usersRepository.findByUsername(
-        dto.username as string,
+        this.normalizeUsername(dto.username) as string,
       );
       if (exists) {
         throw new ConflictException('Ya existe un usuario con ese username');
@@ -109,9 +111,13 @@ export class UsersService implements OnModuleInit {
       type: dto.type,
       fullName: dto.fullName,
       cellphone,
-      username: dto.username ?? null,
+      username: this.normalizeUsername(dto.username),
       passwordHash,
       active: true,
+      mustChangePassword:
+        dto.type === UserType.MONITOR || dto.type === UserType.ADMIN
+          ? dto.mustChangePassword !== false
+          : false,
       nombreJefeVentas:
         dto.type === UserType.VENDEDOR
           ? this.normalizeJefeVentas(dto.nombreJefeVentas)
@@ -170,7 +176,7 @@ export class UsersService implements OnModuleInit {
       await this.assertSellerCellphoneAvailable(cellphone, id);
       user.cellphone = cellphone;
     } else {
-      const username = dto.username as string;
+      const username = this.normalizeUsername(dto.username) as string;
       const taken = await this.usersRepository.findByUsernameExcludingId(
         username,
         id,
@@ -183,6 +189,9 @@ export class UsersService implements OnModuleInit {
       if (dto.password) {
         user.passwordHash = await bcrypt.hash(dto.password, 10);
         passwordChanged = true;
+      }
+      if (dto.mustChangePassword !== undefined) {
+        user.mustChangePassword = Boolean(dto.mustChangePassword);
       }
     }
 
@@ -310,6 +319,7 @@ export class UsersService implements OnModuleInit {
     username: string | null;
     active: boolean;
     nombreJefeVentas?: string | null;
+    mustChangePassword?: boolean;
   }) {
     return {
       id: user.id,
@@ -319,6 +329,7 @@ export class UsersService implements OnModuleInit {
       username: user.username,
       active: user.active,
       nombreJefeVentas: user.nombreJefeVentas ?? null,
+      mustChangePassword: Boolean(user.mustChangePassword),
     };
   }
 
@@ -351,6 +362,12 @@ export class UsersService implements OnModuleInit {
   private normalizeCellphone(cellphone?: string | null): string | null {
     if (cellphone == null) return null;
     return cellphone.trim();
+  }
+
+  private normalizeUsername(username?: string | null): string | null {
+    if (username == null) return null;
+    const value = username.trim().toUpperCase();
+    return value || null;
   }
 
   private normalizeJefeVentas(value?: string | null): string | null {
@@ -544,6 +561,7 @@ export class UsersService implements OnModuleInit {
       cellphone: user.cellphone,
       username: user.username,
       active: user.active,
+      mustChangePassword: Boolean(user.mustChangePassword),
       nombreJefeVentas: user.nombreJefeVentas ?? null,
       permissions: (user.userPermissions ?? [])
         .map((up) => up.permission?.code)

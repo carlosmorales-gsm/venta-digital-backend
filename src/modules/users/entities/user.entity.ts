@@ -46,6 +46,10 @@ export class User {
   @Column({ type: 'boolean', default: true })
   active: boolean;
 
+  /** MONITOR/ADMIN: al iniciar sesión debe capturar una contraseña nueva. */
+  @Column({ name: 'must_change_password', type: 'boolean', default: false })
+  mustChangePassword!: boolean;
+
   /** Nombre del jefe de ventas. Solo aplica a VENDEDOR; va a la carátula. */
   @Column({
     name: 'nombre_jefe_ventas',

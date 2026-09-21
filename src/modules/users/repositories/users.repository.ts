@@ -4,6 +4,10 @@ import { Repository } from 'typeorm';
 import { User } from '../entities/user.entity';
 import { UserType } from '../../../common/enums/user-type.enum';
 
+function usernameKey(username: string): string {
+  return username.trim().toUpperCase();
+}
+
 /** Consultas a `users`. Sin lógica de negocio. */
 @Injectable()
 export class UsersRepository {
@@ -50,8 +54,24 @@ export class UsersRepository {
     return null;
   }
 
+  /** Pasa a mayúsculas los username que ya estaban guardados en minúsculas. */
+  uppercaseExistingUsernames() {
+    return this.repo
+      .createQueryBuilder()
+      .update(User)
+      .set({ username: () => 'UPPER(username)' })
+      .where('username IS NOT NULL')
+      .andWhere('username <> UPPER(username)')
+      .execute();
+  }
+
   findByUsername(username: string): Promise<User | null> {
-    return this.repo.findOne({ where: { username } });
+    return this.repo
+      .createQueryBuilder('user')
+      .where('UPPER(user.username) = :username', {
+        username: usernameKey(username),
+      })
+      .getOne();
   }
 
   /** Otro usuario con el mismo celular (para ediciones). */
@@ -110,10 +130,15 @@ export class UsersRepository {
   findActiveByUsernameWithPermissions(
     username: string,
   ): Promise<User | null> {
-    return this.repo.findOne({
-      where: { username, active: true },
-      relations: { userPermissions: { permission: true } },
-    });
+    return this.repo
+      .createQueryBuilder('user')
+      .leftJoinAndSelect('user.userPermissions', 'userPermissions')
+      .leftJoinAndSelect('userPermissions.permission', 'permission')
+      .where('UPPER(user.username) = :username', {
+        username: usernameKey(username),
+      })
+      .andWhere('user.active = :active', { active: true })
+      .getOne();
   }
 
   list(type?: UserType): Promise<User[]> {

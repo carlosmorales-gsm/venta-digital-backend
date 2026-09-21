@@ -25,6 +25,7 @@ export interface SessionUserView {
   type: UserType;
   permissions: string[];
   nombreJefeVentas: string | null;
+  mustChangePassword: boolean;
 }
 
 export interface AuthTokensResponse {
@@ -32,6 +33,23 @@ export interface AuthTokensResponse {
   refreshToken?: string;
   expiresAt: string;
   user: SessionUserView;
+}
+
+/** Solo cuando el login exige cambio de contraseña. */
+function strongPasswordError(password: string): string | null {
+  if (password.length < 8) {
+    return 'La nueva contraseña debe tener al menos 8 caracteres';
+  }
+  if (!/[A-ZÁÉÍÓÚÜÑ]/.test(password)) {
+    return 'La nueva contraseña debe incluir al menos una letra mayúscula';
+  }
+  if (!/\d/.test(password)) {
+    return 'La nueva contraseña debe incluir al menos un número';
+  }
+  if (!/[^A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9]/.test(password)) {
+    return 'La nueva contraseña debe incluir al menos un carácter especial';
+  }
+  return null;
 }
 
 @Injectable()
@@ -61,6 +79,7 @@ export class AuthService {
       type: user.type,
       permissions: this.permissionCodes(user),
       nombreJefeVentas: user.nombreJefeVentas ?? null,
+      mustChangePassword: Boolean(user.mustChangePassword),
     };
   }
 
@@ -241,6 +260,54 @@ export class AuthService {
     }
 
     return { message: 'Sesión cerrada' };
+  }
+
+  async changeOwnPassword(
+    userId: number,
+    dto: { currentPassword: string; newPassword: string },
+  ) {
+    const user = await this.usersRepository.findById(userId);
+    if (
+      !user ||
+      !user.active ||
+      (user.type !== UserType.MONITOR && user.type !== UserType.ADMIN)
+    ) {
+      throw new UnauthorizedException('No puedes cambiar esta contraseña');
+    }
+    if (!user.passwordHash) {
+      throw new BadRequestException('Este usuario no usa contraseña');
+    }
+
+    const current = dto.currentPassword;
+    const next = dto.newPassword.trim();
+    const matches = await bcrypt.compare(current, user.passwordHash);
+    if (!matches) {
+      throw new BadRequestException('La contraseña actual no es correcta');
+    }
+    if (user.mustChangePassword) {
+      const strength = strongPasswordError(next);
+      if (strength) {
+        throw new BadRequestException(strength);
+      }
+    } else if (next.length < 6) {
+      throw new BadRequestException(
+        'La nueva contraseña debe tener al menos 6 caracteres',
+      );
+    }
+    if (await bcrypt.compare(next, user.passwordHash)) {
+      throw new BadRequestException('La nueva contraseña debe ser distinta a la actual');
+    }
+
+    user.passwordHash = await bcrypt.hash(next, 10);
+    user.mustChangePassword = false;
+    await this.usersRepository.save(user);
+
+    const fresh =
+      await this.usersRepository.findActiveByIdWithPermissions(user.id);
+    return {
+      message: 'Contraseña actualizada',
+      user: this.toUserView(fresh ?? user),
+    };
   }
 
   async me(userId: number): Promise<SessionUserView> {

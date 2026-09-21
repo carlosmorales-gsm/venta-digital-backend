@@ -14,6 +14,7 @@ import { VerifySellerPinDto } from './dto/verify-seller-pin.dto';
 import { MonitorLoginDto } from './dto/monitor-login.dto';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
 import { LogoutDto } from './dto/logout.dto';
+import { ChangePasswordDto } from './dto/change-password.dto';
 import {
   CurrentUser,
   AuthUserPayload,
@@ -60,6 +61,16 @@ export class AuthController {
   @Post('logout')
   logout(@Body() dto: LogoutDto) {
     return this.authService.logout(dto.refreshToken);
+  }
+
+  @UseGuards(AuthGuard('jwt'))
+  @Post('cambiar-password')
+  @HttpCode(HttpStatus.OK)
+  changePassword(
+    @CurrentUser() user: AuthUserPayload,
+    @Body() dto: ChangePasswordDto,
+  ) {
+    return this.authService.changeOwnPassword(user.userId, dto);
   }
 
   @UseGuards(AuthGuard('jwt'))

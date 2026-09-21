@@ -1,5 +1,6 @@
 import {
   IsArray,
+  IsBoolean,
   IsEnum,
   IsOptional,
   IsString,
@@ -42,6 +43,11 @@ export class CreateUserDto {
   @IsString()
   @MinLength(6)
   password?: string;
+
+  /** Solo MONITOR/ADMIN: pedir contraseña nueva en el primer login. */
+  @IsOptional()
+  @IsBoolean()
+  mustChangePassword?: boolean;
 
   /** Permisos extra opcionales (códigos). Si no se envían, se usan los default. */
   @IsOptional()

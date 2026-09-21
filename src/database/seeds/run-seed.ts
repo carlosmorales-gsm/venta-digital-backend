@@ -61,10 +61,14 @@ async function run() {
   const adminName =
     process.env.ADMIN_NAME ?? 'Administrador Venta Digital';
 
-  let admin = await usersRepo.findOne({
-    where: { username: adminUsername },
-    relations: { userPermissions: { permission: true } },
-  });
+  let admin = await usersRepo
+    .createQueryBuilder('user')
+    .leftJoinAndSelect('user.userPermissions', 'userPermissions')
+    .leftJoinAndSelect('userPermissions.permission', 'permission')
+    .where('UPPER(user.username) = :username', {
+      username: adminUsername.trim().toUpperCase(),
+    })
+    .getOne();
 
   const forceReset = process.argv.includes('--reset-admin');
 
@@ -73,7 +77,7 @@ async function run() {
       usersRepo.create({
         type: UserType.ADMIN,
         fullName: adminName,
-        username: adminUsername,
+        username: adminUsername.trim().toUpperCase(),
         cellphone: null,
         passwordHash: await bcrypt.hash(adminPassword, 10),
         active: true,
