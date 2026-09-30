@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
 import { normalizeMxPhone } from '../sales/utils/phone';
@@ -8,13 +8,19 @@ export type TicketNotificationInput = {
   amount: number;
   phone?: string | null;
   email?: string | null;
-  pdfBase64?: string | null;
-  pdfName?: string | null;
+  /** URL pública del PDF (Drive). */
+  pdfLink?: string | null;
+};
+
+export type SignLinkNotificationInput = {
+  customerName: string;
+  email?: string | null;
+  signUrl: string;
 };
 
 /**
- * Mismo envío que api-recibodigital-nest al generar un ticket:
- * SMS + correo (API_SMS / n8n) y WhatsApp (API_OMNI comercial/tickectReciboDigital).
+ * SMS + correo (API_SMS / n8n) y WhatsApp (API_OMNI).
+ * El PDF del ticket se adjunta con la URL de Google Drive.
  */
 @Injectable()
 export class TicketNotificationService {
@@ -24,16 +30,14 @@ export class TicketNotificationService {
 
   async sendPaymentTicket(input: TicketNotificationInput): Promise<void> {
     const phone = normalizeMxPhone(input.phone);
-    const email = (input.email || '').trim();
+    const intendedEmail = (input.email || '').trim();
+    const email = this.mailTo(intendedEmail);
     const amount = Number.isFinite(input.amount) ? input.amount : 0;
     const formattedAmount = this.formatMexicanPeso(amount);
     const simpleAmount = this.formatSimplePeso(amount);
     const name = (input.customerName || 'Cliente').trim();
 
-    const pdfUrl = await this.uploadTicketPdf(
-      input.pdfBase64,
-      input.pdfName || 'ticket-pago.pdf',
-    );
+    const pdfUrl = (input.pdfLink || '').trim() || null;
 
     if (phone.length === 10) {
       await this.safe('SMS', () =>
@@ -49,19 +53,22 @@ estamos para acompañarte y brindarte seguridad en cada paso.`,
     }
 
     if (email) {
+      const betaNote = this.betaNote(intendedEmail, email);
       await this.safe('correo', () =>
         this.sendEmail(
           email,
           `Estimado/a ${name}
-    
+
 Hemos recibido tu pago de ${formattedAmount} ✅
-Adjunto encontrarás tu recibo digital correspondiente.
+Adjunto encontrarás tu recibo digital correspondiente.${betaNote}
 
 Gracias por confiar en Grupo San Martín. Estamos para acompañarte y brindarte seguridad en cada paso.
 
 Atentamente,
 Grupo San Martín`,
-          'Recibo de pago - Grupo San Martín',
+          this.isBeta()
+            ? '[BETA] Recibo de pago - Grupo San Martín'
+            : 'Recibo de pago - Grupo San Martín',
           pdfUrl,
         ),
       );
@@ -82,6 +89,55 @@ Grupo San Martín`,
         'Ticket: sin URL pública del PDF; no se envió WhatsApp',
       );
     }
+  }
+
+  /** Correo aparte del ticket, solo con el enlace de firma. */
+  async sendSignLink(input: SignLinkNotificationInput): Promise<void> {
+    const intendedEmail = (input.email || '').trim();
+    const email = this.mailTo(intendedEmail);
+    const signUrl = (input.signUrl || '').trim();
+    if (!email) {
+      throw new BadRequestException(
+        'El titular no tiene correo para enviar el enlace de firma',
+      );
+    }
+    if (!signUrl) {
+      throw new BadRequestException('No se pudo armar el enlace de firma');
+    }
+    const name = (input.customerName || 'Cliente').trim();
+    const betaNote = this.betaNote(intendedEmail, email);
+    try {
+      await this.sendEmail(
+        email,
+        `Estimado/a ${name}
+
+Tus documentos están listos para que los leas y firmes. Abre este enlace:
+
+${signUrl}${betaNote}
+
+Gracias por confiar en Grupo San Martín. Estamos para acompañarte y brindarte seguridad en cada paso.
+
+Atentamente,
+Grupo San Martín`,
+        this.isBeta()
+          ? '[BETA] Firma de documentos - Grupo San Martín'
+          : 'Firma de documentos - Grupo San Martín',
+      );
+    } catch (e) {
+      const message = (e as Error).message || 'No se pudo enviar el correo';
+      this.logger.error(`No se pudo enviar el enlace de firma: ${message}`);
+      throw new BadRequestException(
+        `No se pudo enviar el enlace de firma: ${message}`,
+      );
+    }
+  }
+
+  private betaNote(intendedEmail: string, email: string): string {
+    if (!this.isBeta()) return '';
+    if (intendedEmail && intendedEmail !== email) {
+      return `\n\n[BETA] El destinatario original era ${intendedEmail}.`;
+    }
+    return '\n\n[BETA] Correo redirigido a sistemas@sanmartin.com.mx.';
   }
 
   private async sendSms(celular: string, message: string) {
@@ -127,43 +183,15 @@ Grupo San Martín`,
     await axios.post(url, request);
   }
 
-  private async uploadTicketPdf(
-    dataBase64?: string | null,
-    fileName = 'ticket-pago.pdf',
-  ): Promise<string | null> {
-    const raw = (dataBase64 || '').trim();
-    if (!raw) return null;
-    const storage = this.envUrl('API_STORAGE');
-    const s3 = this.envUrl('S3_ROUTE');
-    if (!storage || !s3) {
-      this.logger.warn('API_STORAGE o S3_ROUTE no configurados; sin PDF público');
-      return null;
-    }
-    const b64 = raw.includes(',') ? raw.split(',')[1]! : raw;
-    const buffer = Buffer.from(b64, 'base64');
-    if (!buffer.length) return null;
+  /** Beta / development: no mandar correos al titular. */
+  private isBeta(): boolean {
+    const env = (this.config.get<string>('NODE_ENV') ?? '').trim().toLowerCase();
+    return env !== 'production';
+  }
 
-    const form = new FormData();
-    form.append(
-      'file',
-      new Blob([new Uint8Array(buffer)], { type: 'application/pdf' }),
-      fileName,
-    );
-    form.append('userId', 'pdf/TICKET');
-    form.append('fileType', 'pdf');
-    form.append('name', fileName);
-
-    const { data } = await axios.post(
-      `${storage.replace(/\/+$/, '')}/storage/RECIBODIGITAL`,
-      form,
-      { timeout: 180000 },
-    );
-    const file = data?.file;
-    if (!file) {
-      this.logger.warn('Storage no devolvió file para el ticket');
-      return null;
-    }
-    return `${s3.replace(/\/+$/, '')}/${String(file).replace(/^\/+/, '')}`;
+  private mailTo(intended: string): string {
+    if (this.isBeta()) return 'sistemas@sanmartin.com.mx';
+    return intended;
   }
 
   private envUrl(key: string): string {

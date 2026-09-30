@@ -282,6 +282,93 @@ export class GoogleDriveService {
     };
   }
 
+  private async shareAnyoneReader(fileId: string): Promise<void> {
+    if (!this.drive) return;
+    try {
+      await this.drive.permissions.create({
+        fileId,
+        requestBody: { type: 'anyone', role: 'reader' },
+        supportsAllDrives: true,
+      });
+    } catch (e) {
+      this.logger.warn(
+        `Drive: no se pudo compartir ${fileId}: ${(e as Error).message}`,
+      );
+    }
+  }
+
+  /** URL que n8n puede descargar (requiere permiso "anyone"). */
+  driveDownloadUrl(fileId: string): string {
+    return `https://drive.google.com/uc?export=download&id=${fileId}`;
+  }
+
+  /**
+   * Crea (o reutiliza) la carpeta de la venta y sube el ticket de pago.
+   * Se usa al registrar el pago, antes de la firma.
+   */
+  async uploadSaleTicket(params: {
+    saleId: number;
+    titularName: string | null;
+    fecha?: string | null;
+    existingFolderId?: string | null;
+    existingFolderPath?: string | null;
+    existingFolderUrl?: string | null;
+    fileName: string;
+    mime?: string | null;
+    dataBase64: string;
+  }): Promise<{
+    folderId: string;
+    folderName: string;
+    folderUrl: string | null;
+    fileId: string;
+    fileName: string;
+    fileUrl: string | null;
+    downloadUrl: string;
+  } | null> {
+    if (!this.isEnabled()) return null;
+    const buffer = this.bufferFromAttachment({
+      name: params.fileName,
+      mime: params.mime || 'application/pdf',
+      dataBase64: params.dataBase64,
+    });
+    if (!buffer) return null;
+
+    let folderId = (params.existingFolderId || '').trim();
+    let folderName = (params.existingFolderPath || '').trim();
+    let folderUrl = params.existingFolderUrl || null;
+    if (!folderId) {
+      const folder = await this.createSaleFolder({
+        folio: String(params.saleId),
+        titularName: params.titularName,
+        fecha: params.fecha,
+      });
+      folderId = folder.id;
+      folderName = folder.name;
+      folderUrl = folder.webViewLink;
+    }
+
+    const name = params.fileName.endsWith('.pdf')
+      ? params.fileName
+      : `${params.saleId}-Ticket.pdf`;
+    const uploaded = await this.uploadBuffer(
+      folderId,
+      name,
+      params.mime || 'application/pdf',
+      buffer,
+    );
+    await this.shareAnyoneReader(uploaded.id);
+    return {
+      folderId,
+      folderName: folderName || name,
+      folderUrl:
+        folderUrl || `https://drive.google.com/drive/folders/${folderId}`,
+      fileId: uploaded.id,
+      fileName: uploaded.name,
+      fileUrl: uploaded.webViewLink,
+      downloadUrl: this.driveDownloadUrl(uploaded.id),
+    };
+  }
+
   private async uploadBuffer(
     parentId: string,
     fileName: string,

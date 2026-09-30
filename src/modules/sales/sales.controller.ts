@@ -137,6 +137,16 @@ export class SalesController {
     return this.salesService.savePayment(id, user, dto);
   }
 
+  /** Correo aparte del ticket, con el enlace para que el cliente firme. */
+  @Post(':id/sign-link')
+  @Roles(UserType.VENDEDOR)
+  sendSignLink(
+    @Param('id', ParseIntPipe) id: number,
+    @CurrentUser() user: AuthUserPayload,
+  ) {
+    return this.salesService.sendClientSignLink(id, user);
+  }
+
   @Post(':id/sign')
   @Roles(UserType.VENDEDOR)
   sign(

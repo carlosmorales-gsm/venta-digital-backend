@@ -18,8 +18,17 @@ export class SaleAttachmentDto {
   @IsString()
   mime!: string;
 
+  @IsOptional()
   @IsString()
-  dataBase64!: string;
+  dataBase64?: string;
+
+  @IsOptional()
+  @IsString()
+  driveFileId?: string | null;
+
+  @IsOptional()
+  @IsString()
+  driveFileUrl?: string | null;
 }
 
 export class SalePersonDto {

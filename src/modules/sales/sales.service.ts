@@ -14,6 +14,7 @@ import { AuditService } from '../audit/audit.service';
 import { AuditAction } from '../audit/enums/audit-action.enum';
 import { AuditEntityType } from '../audit/enums/audit-entity-type.enum';
 import { Sale } from './entities/sale.entity';
+import { SaleDocument } from './entities/sale-document.entity';
 import { AuthUserPayload } from '../../common/decorators/current-user.decorator';
 import { UserType } from '../../common/enums/user-type.enum';
 import { GoogleDriveService } from './google-drive.service';
@@ -38,7 +39,8 @@ import {
 } from './mappers/sale.mapper';
 import { assertValidCurp } from './utils/curp';
 import { assertMxPhone } from './utils/phone';
-import { SaleDocument } from './entities/sale-document.entity';
+import { ConfigService } from '@nestjs/config';
+import { JwtService } from '@nestjs/jwt';
 import { SettingsService } from '../settings/settings.service';
 import { DiscountsService } from '../discounts/discounts.service';
 import { OdooGsmClient, type OdooVdReceptionLink } from '../odoo/odoo-gsm.client';
@@ -59,6 +61,8 @@ export class SalesService {
     private readonly discountsService: DiscountsService,
     private readonly odooGsm: OdooGsmClient,
     private readonly ticketNotifications: TicketNotificationService,
+    private readonly config: ConfigService,
+    private readonly jwt: JwtService,
   ) {}
 
   private parseMoney(v: unknown): number {
@@ -363,6 +367,18 @@ export class SalesService {
       } catch (e) {
         throw new BadRequestException((e as Error).message);
       }
+    }
+
+    const entregaTitular = (
+      payload.contacto?.domicilioEntregaDocumentacion || ''
+    ).trim();
+    const entregaSegundo = (
+      payload.segundoContacto?.domicilioEntregaDocumentacion || ''
+    ).trim();
+    if (Boolean(entregaTitular) === Boolean(entregaSegundo)) {
+      throw new BadRequestException(
+        'Indica un solo domicilio para entrega de documentación (titular o segundo contacto)',
+      );
     }
 
     const cobranza = (payload.contacto?.tipoCobranza || '').trim().toUpperCase();
@@ -994,16 +1010,6 @@ export class SalesService {
       }
       sale = existing;
     } else {
-      const { draftLimit } = await this.settingsService.getDraftPolicy();
-      const count = await this.salesRepository.countActiveDrafts(
-        user.userId,
-        new Date(),
-      );
-      if (count >= draftLimit) {
-        throw new BadRequestException(
-          `Solo puedes tener ${draftLimit} borradores activos`,
-        );
-      }
       sale = this.salesRepository.create();
       sale.sellerId = user.userId;
       sale.sellerName = seller?.fullName ?? 'Vendedor';
@@ -1178,17 +1184,53 @@ export class SalesService {
       sale.nombreAsesor = sale.sellerName?.trim() || '';
     }
 
+    const titular =
+      sale.titularName || (sale.holder ? fullName(sale.holder) : '') || 'sin titular';
+
+    let ticketPdfLink: string | null = null;
     if (dto.ticketPdf?.dataBase64) {
       const docs = (sale.documents ?? []).filter(
         (d) => d.kind !== DocumentKind.TICKET_PAGO,
       );
       const ticket = new SaleDocument();
       ticket.kind = DocumentKind.TICKET_PAGO;
-      ticket.name = dto.ticketPdf.name || `ticket-pago_${sale.id}.pdf`;
+      ticket.name = dto.ticketPdf.name || `${sale.id}-Ticket.pdf`;
       ticket.mime = dto.ticketPdf.mime || 'application/pdf';
       ticket.dataBase64 = dto.ticketPdf.dataBase64;
       ticket.driveFileId = null;
       ticket.driveFileUrl = null;
+      if (this.googleDrive.isEnabled()) {
+        try {
+          const uploaded = await this.googleDrive.uploadSaleTicket({
+            saleId: sale.id,
+            titularName: titular,
+            fecha: sale.fecha,
+            existingFolderId: sale.driveFolderId,
+            existingFolderPath: sale.driveFolderPath,
+            existingFolderUrl: sale.driveFolderUrl,
+            fileName: ticket.name,
+            mime: ticket.mime,
+            dataBase64: ticket.dataBase64,
+          });
+          if (uploaded) {
+            ticket.driveFileId = uploaded.fileId;
+            ticket.driveFileUrl = uploaded.fileUrl;
+            ticket.name = uploaded.fileName || ticket.name;
+            sale.driveFolderId = uploaded.folderId;
+            sale.driveFolderUrl = uploaded.folderUrl;
+            sale.driveFolderPath = uploaded.folderName;
+            ticketPdfLink = uploaded.downloadUrl;
+          }
+        } catch (e) {
+          this.logger.error(
+            `Venta #${sale.id}: no se subió el ticket a Drive — ${(e as Error).message}`,
+          );
+        }
+      } else {
+        this.logger.warn(
+          `Venta #${sale.id}: Drive no configurado; ticket sin URL pública`,
+        );
+      }
       docs.push(ticket);
       sale.documents = docs;
     }
@@ -1214,9 +1256,6 @@ export class SalesService {
     sale.status = SaleStatus.PENDING_SIGNATURE;
     await this.salesRepository.save(sale);
 
-    const titular =
-      sale.titularName || (sale.holder ? fullName(sale.holder) : '') || 'sin titular';
-
     await this.auditService.record({
       actor: {
         userId: user.userId,
@@ -1239,8 +1278,7 @@ export class SalesService {
         amount: dueNum,
         phone: sale.holder?.celular1,
         email: sale.holder?.correo,
-        pdfBase64: dto.ticketPdf?.dataBase64,
-        pdfName: dto.ticketPdf?.name || `${sale.id}-TicketPago.pdf`,
+        pdfLink: ticketPdfLink,
       });
     } catch (e) {
       this.logger.error(
@@ -1254,10 +1292,118 @@ export class SalesService {
     };
   }
 
-  async signSale(id: number, user: AuthUserPayload, dto: SignSaleDto) {
-    const sale = await this.salesRepository.findByIdWithFiles(id);
+  /** Envía solo el enlace de firma al correo del titular. No incluye el ticket. */
+  async sendClientSignLink(id: number, user: AuthUserPayload) {
+    const sale = await this.salesRepository.findById(id);
     if (!sale) throw new NotFoundException('Venta no encontrada');
     this.assertSellerOwns(sale, user.userId);
+    if (sale.status !== SaleStatus.PENDING_SIGNATURE) {
+      throw new BadRequestException(
+        'Solo se puede enviar el enlace cuando la venta está pendiente de firma',
+      );
+    }
+
+    const email = (sale.holder?.correo || '').trim();
+    if (!email) {
+      throw new BadRequestException(
+        'El titular no tiene correo para enviar el enlace de firma',
+      );
+    }
+
+    const titular =
+      sale.titularName ||
+      (sale.holder ? fullName(sale.holder) : '') ||
+      'Cliente';
+    await this.ticketNotifications.sendSignLink({
+      customerName: titular,
+      email,
+      signUrl: this.clientSignUrl(sale.id),
+    });
+
+    const seller = await this.usersRepository.findById(user.userId);
+    await this.auditService.record({
+      actor: {
+        userId: user.userId,
+        fullName: seller?.fullName,
+        type: user.type,
+      },
+      action: AuditAction.UPDATE,
+      entityType: AuditEntityType.SALE,
+      entityId: sale.id,
+      summary: `${seller?.fullName ?? 'Vendedor'} envió el enlace de firma de venta #${sale.id} (${titular})`,
+      details: { email },
+    });
+
+    return { ok: true };
+  }
+
+  private clientSignToken(saleId: number): string {
+    return this.jwt.sign(
+      { purpose: 'client-sign', saleId },
+      { expiresIn: '30d' },
+    );
+  }
+
+  private parseClientSignToken(raw: string): number {
+    const token = decodeURIComponent(String(raw || '').trim());
+    if (!token) {
+      throw new NotFoundException('Enlace de firma inválido o vencido');
+    }
+    try {
+      const payload = this.jwt.verify<{ purpose?: string; saleId?: number }>(
+        token,
+      );
+      const saleId = Number(payload?.saleId);
+      if (payload?.purpose !== 'client-sign' || !Number.isInteger(saleId) || saleId < 1) {
+        throw new Error('bad payload');
+      }
+      return saleId;
+    } catch {
+      throw new NotFoundException('Enlace de firma inválido o vencido');
+    }
+  }
+
+  private clientSignUrl(saleId: number): string {
+    const front = (
+      this.config.get<string>('FRONT_URL') || 'http://localhost:5173'
+    )
+      .trim()
+      .replace(/\/+$/, '');
+    return `${front}/firmar/${encodeURIComponent(this.clientSignToken(saleId))}`;
+  }
+
+  async getForClientSign(token: string) {
+    const id = this.parseClientSignToken(token);
+    const sale = await this.salesRepository.findByIdWithFiles(id);
+    if (!sale) throw new NotFoundException('Enlace de firma inválido o vencido');
+    if (
+      sale.status === SaleStatus.COMPLETED ||
+      sale.status === SaleStatus.PENDING_VALIDATION
+    ) {
+      return { ...saleToListItem(sale), alreadySigned: true, payload: {} };
+    }
+    if (sale.status !== SaleStatus.PENDING_SIGNATURE) {
+      throw new BadRequestException(
+        'Esta venta aún no está lista para firmar. Espera el registro del pago.',
+      );
+    }
+    return { ...saleToPublic(sale), alreadySigned: false };
+  }
+
+  async signSaleByClientToken(token: string, dto: SignSaleDto) {
+    const id = this.parseClientSignToken(token);
+    return this.signSale(id, null, dto, true);
+  }
+
+  async signSale(
+    id: number,
+    user: AuthUserPayload | null,
+    dto: SignSaleDto,
+    viaClientLink = false,
+  ) {
+    const sale = await this.salesRepository.findByIdWithFiles(id);
+    if (!sale) throw new NotFoundException('Venta no encontrada');
+    if (user) this.assertSellerOwns(sale, user.userId);
     if (
       sale.status === SaleStatus.COMPLETED ||
       sale.status === SaleStatus.PENDING_VALIDATION
@@ -1439,7 +1585,10 @@ export class SalesService {
       tarjetaPdf: docAtt(DocumentKind.TARJETA),
       reciboNomina: docAtt(DocumentKind.RECIBO_NOMINA),
       domiciliacionBanorte: docAtt(DocumentKind.BANORTE_DOM),
-      ticketPago: docAtt(DocumentKind.TICKET_PAGO),
+      ticketPago: docs.find((d) => d.kind === DocumentKind.TICKET_PAGO)
+        ?.driveFileId
+        ? null
+        : docAtt(DocumentKind.TICKET_PAGO),
       comprobanteTransferencia: docAtt(DocumentKind.COMP_TRANSFERENCIA),
       firmaCliente: dto.firmaCliente,
     };
@@ -1558,20 +1707,27 @@ export class SalesService {
       await this.salesRepository.save(sale);
     }
 
-    const seller = await this.usersRepository.findById(user.userId);
+    const seller = user
+      ? await this.usersRepository.findById(user.userId)
+      : await this.usersRepository.findById(sale.sellerId);
     const titular =
       sale.titularName || (sale.holder ? fullName(sale.holder) : '') || 'sin titular';
+    const actorName = viaClientLink
+      ? titular
+      : seller?.fullName ?? 'Vendedor';
 
     await this.auditService.record({
       actor: {
-        userId: user.userId,
-        fullName: seller?.fullName,
-        type: user.type,
+        userId: viaClientLink ? null : user?.userId ?? sale.sellerId,
+        fullName: actorName,
+        type: viaClientLink ? 'CLIENTE' : user?.type,
       },
       action: AuditAction.UPDATE,
       entityType: AuditEntityType.SALE,
       entityId: sale.id,
-      summary: `${seller?.fullName ?? 'Vendedor'} firmó venta #${sale.id} (${titular})`,
+      summary: viaClientLink
+        ? `El titular firmó venta #${sale.id} (${titular}) desde el enlace del correo`
+        : `${seller?.fullName ?? 'Vendedor'} firmó venta #${sale.id} (${titular})`,
       details: { after: saleToAuditSnapshot(sale) },
     });
 

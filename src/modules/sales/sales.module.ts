@@ -3,6 +3,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { SalesController } from './sales.controller';
 import { DriveController } from './drive.controller';
 import { IntegrationsController } from './integrations.controller';
+import { PublicSignController } from './public-sign.controller';
 import { SalesService } from './sales.service';
 import { ApiKeyGuard } from '../../common/guards/api-key.guard';
 import { SalesRepository } from './repositories/sales.repository';
@@ -19,6 +20,7 @@ import { SettingsModule } from '../settings/settings.module';
 import { DiscountsModule } from '../discounts/discounts.module';
 import { OdooModule } from '../odoo/odoo.module';
 import { NotificationsModule } from '../notifications/notifications.module';
+import { AuthModule } from '../auth/auth.module';
 
 @Module({
   imports: [
@@ -36,8 +38,14 @@ import { NotificationsModule } from '../notifications/notifications.module';
     DiscountsModule,
     OdooModule,
     NotificationsModule,
+    AuthModule,
   ],
-  controllers: [SalesController, DriveController, IntegrationsController],
+  controllers: [
+    SalesController,
+    DriveController,
+    IntegrationsController,
+    PublicSignController,
+  ],
   providers: [SalesService, SalesRepository, GoogleDriveService, ApiKeyGuard],
   exports: [SalesService, GoogleDriveService],
 })
