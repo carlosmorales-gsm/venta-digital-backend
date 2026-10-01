@@ -22,7 +22,7 @@ export class WhatsappService {
     return (this.config.get<string>('API_WHATS') ?? '').trim();
   }
 
-  async sendNip(cellphone: string): Promise<SendNipResult> {//test
+  async sendNip(cellphone: string): Promise<SendNipResult> {
     const originId = Number(this.config.get('WHATSAPP_ORIGIN_ID') ?? 1);
     const expiredTime = Number(
       this.config.get('WHATSAPP_NIP_EXPIRE_MINUTES') ?? 5,
