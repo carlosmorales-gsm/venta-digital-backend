@@ -91,6 +91,9 @@ function money(v: unknown): number {
 export function recognizedFromVentas(raw: string | null | undefined): number {
   const list = parseReconocimientoVentas(raw);
   return list.reduce((sum, item: any) => {
+    if (item?.paidAmount != null && item.paidAmount !== '') {
+      return sum + Math.max(0, money(item.paidAmount));
+    }
     const total = money(item?.amountTotal);
     const remaining = money(item?.saldo);
     return sum + Math.max(0, total - remaining);

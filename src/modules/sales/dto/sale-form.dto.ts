@@ -110,6 +110,7 @@ export class ReconocimientoVentaDto {
   @IsOptional() @IsString() dateOrder?: string;
   @IsOptional() @Type(() => Number) amountTotal?: number;
   @IsOptional() @Type(() => Number) saldo?: number;
+  @IsOptional() @Type(() => Number) paidAmount?: number;
   @IsOptional() @IsString() matchType?: string;
   @IsOptional() @IsString() matchedBeneficiaryName?: string;
 }

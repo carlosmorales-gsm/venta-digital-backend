@@ -92,6 +92,7 @@ export type OdooVentaSuspendida = {
   dateOrder: string;
   amountTotal: number;
   saldo: number;
+  paidAmount?: number;
   matchType: 'titular' | 'beneficiario';
   matchedBeneficiaryName: string;
 };
