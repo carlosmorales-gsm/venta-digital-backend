@@ -51,6 +51,7 @@ import { formatDigitalFolio } from './utils/digital-folio';
 @Injectable()
 export class SalesService {
   private readonly logger = new Logger(SalesService.name);
+  private readonly odooPushInflight = new Set<number>();
 
   constructor(
     private readonly salesRepository: SalesRepository,
@@ -160,7 +161,27 @@ export class SalesService {
     try {
       await this.ensureCaratulaFromDrive(sale);
       await this.hydrateAllDocuments(sale);
-      const payload = saleToPublic(sale);
+      const publicSale = saleToPublic(sale);
+      const payloadBody =
+        publicSale.payload && typeof publicSale.payload === 'object'
+          ? (publicSale.payload as Record<string, unknown>)
+          : {};
+      const pago =
+        payloadBody.pago && typeof payloadBody.pago === 'object'
+          ? (payloadBody.pago as Record<string, unknown>)
+          : {};
+      const payload = {
+        ...publicSale,
+        sellerId: 2,
+        sellerName: '',
+        payload: {
+          ...payloadBody,
+          pago: {
+            ...pago,
+            nombreAsesor: '',
+          },
+        },
+      };
       await this.odooGsm.syncVdReception(payload as unknown as Record<string, unknown>);
       sale.odooReceptionSynced = true;
       await this.salesRepository.saveWithoutDocuments(sale);
@@ -222,6 +243,33 @@ export class SalesService {
     ) {
       sale.odooSaleOrderId = saleOrderId;
       if (contrato) sale.contrato = contrato;
+    }
+  }
+
+  /**
+   * Reenvía a Odoo las ventas que ya salieron del borrador y no marcaron
+   * expediente sincronizado. Se dispara al abrir el listado (login).
+   */
+  private async pushUnsyncedReceptionsToOdoo(sales: Sale[]) {
+    const pending = sales.filter(
+      (sale) =>
+        !sale.odooReceptionSynced &&
+        sale.status !== SaleStatus.DRAFT &&
+        sale.status !== SaleStatus.REJECTED,
+    );
+    if (!pending.length) return;
+    this.logger.log(
+      `Expedientes Odoo pendientes de sincronizar: ${pending.length}`,
+    );
+    for (const sale of pending) {
+      if (this.odooPushInflight.has(sale.id)) continue;
+      this.odooPushInflight.add(sale.id);
+      try {
+        const result = await this.syncReceptionToOdoo(sale.id);
+        sale.odooReceptionSynced = result.synced;
+      } finally {
+        this.odooPushInflight.delete(sale.id);
+      }
     }
   }
 
@@ -467,6 +515,11 @@ export class SalesService {
     const items = await this.salesRepository.findSummariesBySellerId(sellerId);
     await this.pullOdooLinksIfMissing(items);
     await this.refreshSignedStatuses(items);
+    void this.pushUnsyncedReceptionsToOdoo(items).catch((e) => {
+      this.logger.error(
+        `No se pudieron reenviar expedientes a Odoo: ${(e as Error).message}`,
+      );
+    });
     const now = Date.now();
     const visible = items.filter((s) => {
       if (s.status === SaleStatus.DRAFT) {
