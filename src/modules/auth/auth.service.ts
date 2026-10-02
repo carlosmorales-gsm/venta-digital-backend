@@ -2,6 +2,7 @@ import {
   Injectable,
   UnauthorizedException,
   BadRequestException,
+  ForbiddenException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
@@ -18,6 +19,10 @@ import { VerifySellerPinDto } from './dto/verify-seller-pin.dto';
 import { MonitorLoginDto } from './dto/monitor-login.dto';
 import { UsersRepository } from '../users/repositories/users.repository';
 import { RefreshTokensRepository } from '../users/repositories/refresh-tokens.repository';
+import { AuditService } from '../audit/audit.service';
+import { AuditAction } from '../audit/enums/audit-action.enum';
+import { AuditEntityType } from '../audit/enums/audit-entity-type.enum';
+import { AuthUserPayload } from '../../common/decorators/current-user.decorator';
 
 export interface SessionUserView {
   id: number;
@@ -60,6 +65,7 @@ export class AuthService {
     private readonly jwtService: JwtService,
     private readonly whatsapp: WhatsappService,
     private readonly config: ConfigService,
+    private readonly auditService: AuditService,
   ) {}
 
   private get businessTimezone(): string {
@@ -103,23 +109,46 @@ export class AuthService {
       throw new UnauthorizedException('Vendedor no encontrado o inactivo');
     }
 
-    const expiresInSeconds = secondsUntilEndOfDay(this.businessTimezone);
-    const permissions = this.permissionCodes(seller);
-    const accessToken = this.jwtService.sign(
-      {
-        sub: seller.id,
-        type: seller.type,
-        permissions,
-        tokenUse: 'access',
-      },
-      { expiresIn: expiresInSeconds },
-    );
+    return this.issueSellerSession(seller);
+  }
 
-    return {
-      accessToken,
-      expiresAt: endOfDayUtcIso(this.businessTimezone),
-      user: this.toUserView(seller),
-    };
+  /**
+   * Admin: entra como un vendedor activo (JWT de vendedor hasta fin del día).
+   * No revoca el refresh del administrador.
+   */
+  async enterAsSeller(
+    actor: AuthUserPayload,
+    sellerId: number,
+  ): Promise<AuthTokensResponse> {
+    if (actor.type !== UserType.ADMIN) {
+      throw new ForbiddenException('Solo un administrador puede entrar como vendedor');
+    }
+
+    const seller =
+      await this.usersRepository.findActiveByIdWithPermissions(sellerId);
+
+    if (!seller || seller.type !== UserType.VENDEDOR) {
+      throw new BadRequestException('Selecciona un vendedor activo');
+    }
+
+    const admin = await this.usersRepository.findById(actor.userId);
+    await this.auditService.record({
+      actor: {
+        userId: actor.userId,
+        fullName: admin?.fullName ?? null,
+        type: actor.type,
+      },
+      action: AuditAction.APPLY,
+      entityType: AuditEntityType.USER,
+      entityId: seller.id,
+      summary: `Entró como vendedor ${seller.fullName}`,
+      details: {
+        sellerId: seller.id,
+        sellerName: seller.fullName,
+      },
+    });
+
+    return this.issueSellerSession(seller, actor.userId);
   }
 
   /**
@@ -168,15 +197,22 @@ export class AuthService {
       throw new UnauthorizedException('Vendedor no encontrado o inactivo');
     }
 
+    return this.issueSellerSession(seller);
+  }
+
+  private issueSellerSession(
+    seller: User,
+    impersonatedBy?: number,
+  ): AuthTokensResponse {
     const expiresInSeconds = secondsUntilEndOfDay(this.businessTimezone);
     const permissions = this.permissionCodes(seller);
-
     const accessToken = this.jwtService.sign(
       {
         sub: seller.id,
         type: seller.type,
         permissions,
         tokenUse: 'access',
+        ...(impersonatedBy ? { impersonatedBy } : {}),
       },
       { expiresIn: expiresInSeconds },
     );

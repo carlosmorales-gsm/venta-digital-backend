@@ -15,10 +15,14 @@ import { MonitorLoginDto } from './dto/monitor-login.dto';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
 import { LogoutDto } from './dto/logout.dto';
 import { ChangePasswordDto } from './dto/change-password.dto';
+import { ImpersonateSellerDto } from './dto/impersonate-seller.dto';
 import {
   CurrentUser,
   AuthUserPayload,
 } from '../../common/decorators/current-user.decorator';
+import { Roles } from '../../common/decorators/roles.decorator';
+import { RolesGuard } from '../../common/guards/roles.guard';
+import { UserType } from '../../common/enums/user-type.enum';
 
 @Controller('auth')
 export class AuthController {
@@ -77,5 +81,17 @@ export class AuthController {
   @Get('me')
   me(@CurrentUser() user: AuthUserPayload) {
     return this.authService.me(user.userId);
+  }
+
+  /** Admin: emite sesión de vendedor (mismo JWT de fin de día). */
+  @UseGuards(AuthGuard('jwt'), RolesGuard)
+  @Roles(UserType.ADMIN)
+  @Post('admin/entrar-vendedor')
+  @HttpCode(HttpStatus.OK)
+  enterAsSeller(
+    @CurrentUser() user: AuthUserPayload,
+    @Body() dto: ImpersonateSellerDto,
+  ) {
+    return this.authService.enterAsSeller(user, dto.sellerId);
   }
 }
