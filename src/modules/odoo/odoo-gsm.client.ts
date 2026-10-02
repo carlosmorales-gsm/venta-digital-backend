@@ -118,6 +118,8 @@ export type OdooVdReceptionLink = {
   partnerId: number;
   saleOrderId: number;
   contrato: string;
+  writeDate?: string;
+  vdSaleStatus?: string;
 };
 
 @Injectable()
@@ -582,6 +584,8 @@ export class OdooGsmClient {
           partnerId: Number(row.partnerId) || 0,
           saleOrderId: Number(row.saleOrderId) || 0,
           contrato: String(row.contrato || ''),
+          writeDate: String(row.writeDate || ''),
+          vdSaleStatus: String(row.vdSaleStatus || ''),
         }))
         .filter((row) => row.vdSaleId > 0);
     } catch (e: any) {

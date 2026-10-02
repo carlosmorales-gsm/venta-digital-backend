@@ -50,7 +50,7 @@ function tipoVentaFromEstatus(estatus: string): string {
   return 'NUEVA';
 }
 
-function parseReconocimientoVentas(raw: string | null | undefined) {
+export function parseReconocimientoVentas(raw: string | null | undefined) {
   if (!raw?.trim()) return [];
   try {
     const parsed = JSON.parse(raw);

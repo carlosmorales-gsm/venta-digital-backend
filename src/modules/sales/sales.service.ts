@@ -31,6 +31,7 @@ import {
   isUasConvenioPago,
   needsCardDocumentos,
   realContrato,
+  parseReconocimientoVentas,
   recognizedFromVentas,
   saleToAuditSnapshot,
   saleToPayload,
@@ -246,20 +247,43 @@ export class SalesService {
     }
   }
 
+  private saleReadyForOdooReception(sale: Sale): boolean {
+    return (
+      sale.status !== SaleStatus.DRAFT && sale.status !== SaleStatus.REJECTED
+    );
+  }
+
   /**
-   * Reenvía a Odoo las ventas que ya salieron del borrador y no marcaron
-   * expediente sincronizado. Se dispara al abrir el listado (login).
+   * Al abrir el listado (login): crea el expediente si no está en Odoo
+   * y lo actualiza si la venta local cambió después del último envío.
    */
   private async pushUnsyncedReceptionsToOdoo(sales: Sale[]) {
-    const pending = sales.filter(
-      (sale) =>
-        !sale.odooReceptionSynced &&
-        sale.status !== SaleStatus.DRAFT &&
-        sale.status !== SaleStatus.REJECTED,
+    const eligible = sales.filter((sale) => this.saleReadyForOdooReception(sale));
+    if (!eligible.length) return;
+
+    const links = await this.odooGsm.getVdReceptionLinks(
+      eligible.map((sale) => sale.id),
     );
+    const byId = new Map(links.map((link) => [link.vdSaleId, link]));
+    const pending = eligible.filter((sale) => {
+      const link = byId.get(sale.id);
+      if (!link) return true;
+      if (!sale.odooReceptionSynced) return true;
+      const odooStatus = String(link.vdSaleStatus || '')
+        .trim()
+        .toUpperCase();
+      if (odooStatus && odooStatus !== String(sale.status).toUpperCase()) {
+        return true;
+      }
+      const odooMs = link.writeDate ? new Date(link.writeDate).getTime() : 0;
+      if (Number.isFinite(odooMs) && odooMs > 0) {
+        return sale.updatedAt.getTime() > odooMs + 2500;
+      }
+      return false;
+    });
     if (!pending.length) return;
     this.logger.log(
-      `Expedientes Odoo pendientes de sincronizar: ${pending.length}`,
+      `Expedientes Odoo a crear o actualizar: ${pending.length}`,
     );
     for (const sale of pending) {
       if (this.odooPushInflight.has(sale.id)) continue;
@@ -1070,6 +1094,27 @@ export class SalesService {
     }
 
     applyPayloadToSale(sale, dto.payload);
+    const tipoVenta = String(dto.payload?.meta?.tipoVenta || sale.estatus || '')
+      .trim()
+      .toUpperCase();
+    const originSales = parseReconocimientoVentas(sale.reconocimientoVentas);
+    if (
+      (tipoVenta === 'RECONOCIMIENTO' ||
+        tipoVenta === 'MEJORA' ||
+        tipoVenta === 'MINORIA' ||
+        sale.estatus === 'REACTIVACION' ||
+        sale.estatus === 'MEJORA' ||
+        sale.estatus === 'MINORIA') &&
+      !originSales.length
+    ) {
+      throw new BadRequestException(
+        tipoVenta === 'MEJORA' || sale.estatus === 'MEJORA'
+          ? 'Selecciona al menos una venta a mejorar'
+          : tipoVenta === 'MINORIA' || sale.estatus === 'MINORIA'
+            ? 'Selecciona al menos una venta de minoría'
+            : 'Selecciona al menos una venta a reconocer',
+      );
+    }
     this.applySellerCatalogNames(sale, seller);
     await this.assertDiscountAndSaldo(sale, user.userId);
     sale.status = SaleStatus.PENDING_PAYMENT;
