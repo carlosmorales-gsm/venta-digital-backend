@@ -27,6 +27,7 @@ import {
   SignSaleDto,
   UpsertSaleDto,
 } from './dto/sale-form.dto';
+import { SendSignLinkDto } from './dto/send-sign-link.dto';
 
 @Controller('sales')
 @UseGuards(AuthGuard('jwt'), RolesGuard, PermissionsGuard)
@@ -143,8 +144,9 @@ export class SalesController {
   sendSignLink(
     @Param('id', ParseIntPipe) id: number,
     @CurrentUser() user: AuthUserPayload,
+    @Body() dto: SendSignLinkDto,
   ) {
-    return this.salesService.sendClientSignLink(id, user);
+    return this.salesService.sendClientSignLink(id, user, dto.frontUrl);
   }
 
   @Post(':id/sign')

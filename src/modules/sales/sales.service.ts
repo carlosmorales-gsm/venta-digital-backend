@@ -1391,7 +1391,11 @@ export class SalesService {
   }
 
   /** Envía solo el enlace de firma al correo del titular. No incluye el ticket. */
-  async sendClientSignLink(id: number, user: AuthUserPayload) {
+  async sendClientSignLink(
+    id: number,
+    user: AuthUserPayload,
+    frontUrl?: string,
+  ) {
     const sale = await this.salesRepository.findById(id);
     if (!sale) throw new NotFoundException('Venta no encontrada');
     this.assertSellerOwns(sale, user.userId);
@@ -1415,7 +1419,7 @@ export class SalesService {
     await this.ticketNotifications.sendSignLink({
       customerName: titular,
       email,
-      signUrl: this.clientSignUrl(sale.id),
+      signUrl: this.clientSignUrl(sale.id, frontUrl),
     });
 
     const seller = await this.usersRepository.findById(user.userId);
@@ -1461,12 +1465,25 @@ export class SalesService {
     }
   }
 
-  private clientSignUrl(saleId: number): string {
-    const front = (
-      this.config.get<string>('FRONT_URL') || 'http://localhost:5173'
-    )
+  private resolveFrontBase(frontUrl?: string): string {
+    const fromClient = String(frontUrl || '')
       .trim()
       .replace(/\/+$/, '');
+    if (/^https?:\/\/[^\s/]+/i.test(fromClient)) {
+      return fromClient;
+    }
+
+    if (this.config.get<string>('NODE_ENV') !== 'production') {
+      return 'http://localhost:5173';
+    }
+
+    throw new BadRequestException(
+      'No se pudo armar el enlace de firma: falta la URL del front.',
+    );
+  }
+
+  private clientSignUrl(saleId: number, frontUrl?: string): string {
+    const front = this.resolveFrontBase(frontUrl);
     return `${front}/firmar/${encodeURIComponent(this.clientSignToken(saleId))}`;
   }
 
