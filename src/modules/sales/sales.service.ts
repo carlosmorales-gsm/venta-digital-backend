@@ -48,6 +48,12 @@ import { OdooGsmClient, type OdooVdReceptionLink } from '../odoo/odoo-gsm.client
 import { PlanKind } from './enums/plan-kind.enum';
 import { CONTRATO_STAMPS, stampTextOnPdf } from './utils/stamp-caratula-contrato';
 import { formatDigitalFolio } from './utils/digital-folio';
+import {
+  correctionCompanionKey,
+  correctionFieldByKey,
+  parseCorrectionRequest,
+  writePath,
+} from './correction-fields';
 
 @Injectable()
 export class SalesService {
@@ -365,7 +371,14 @@ export class SalesService {
   }
 
   private async purgeExpired() {
-    await this.salesRepository.deleteExpiredDrafts(new Date());
+    const { draftTtlHours } = await this.settingsService.getDraftPolicy();
+    try {
+      await this.salesRepository.deleteExpiredDrafts(new Date(), draftTtlHours);
+    } catch (e) {
+      this.logger.warn(
+        `No se pudieron borrar borradores vencidos: ${(e as Error).message}`,
+      );
+    }
   }
 
   private validateCapture(payload: UpsertSaleDto['payload'], strictDocs: boolean) {
@@ -545,16 +558,18 @@ export class SalesService {
       );
     });
     const now = Date.now();
+    const { draftLimit, draftTtlHours } =
+      await this.settingsService.getDraftPolicy();
+    const ttlMs = draftTtlHours * 60 * 60 * 1000;
     const visible = items.filter((s) => {
-      if (s.status === SaleStatus.DRAFT) {
-        return !s.draftExpiresAt || s.draftExpiresAt.getTime() > now;
-      }
+      if (s.status !== SaleStatus.DRAFT) return true;
+      const created = s.createdAt?.getTime?.() ?? 0;
+      if (created && created + ttlMs <= now) return false;
+      if (s.draftExpiresAt && s.draftExpiresAt.getTime() <= now) return false;
       return true;
     });
     const drafts = visible.filter((s) => s.status === SaleStatus.DRAFT);
     const pipeline = visible.filter((s) => s.status !== SaleStatus.DRAFT);
-    const { draftLimit, draftTtlHours } =
-      await this.settingsService.getDraftPolicy();
 
     return {
       scope: 'own' as const,
@@ -808,6 +823,113 @@ export class SalesService {
     };
   }
 
+  /** Mesa de Control marca campos o documentos para que el vendedor los corrija. */
+  async requestCorrectionFromOdoo(id: number, fields: string[]) {
+    const sale = await this.salesRepository.findById(id);
+    if (!sale) throw new NotFoundException('Venta no encontrada');
+
+    const keys = [...new Set(fields.map((item) => item.trim()).filter(Boolean))];
+    if (!keys.length || keys.some((key) => !correctionFieldByKey(key))) {
+      throw new BadRequestException('Selecciona campos válidos para corregir');
+    }
+
+    const allowed = new Set<SaleStatus>([
+      SaleStatus.PENDING_PAYMENT,
+      SaleStatus.PENDING_SIGNATURE,
+      SaleStatus.PENDING_VALIDATION,
+      SaleStatus.COMPLETED,
+      SaleStatus.PENDING_CORRECTION,
+    ]);
+    if (!allowed.has(sale.status)) {
+      throw new BadRequestException(
+        'Esta venta no se puede mandar a corrección',
+      );
+    }
+
+    const previous = parseCorrectionRequest(sale.correctionRequest);
+    const returnStatus =
+      sale.status === SaleStatus.PENDING_CORRECTION
+        ? previous.returnStatus || SaleStatus.PENDING_VALIDATION
+        : sale.status;
+
+    sale.status = SaleStatus.PENDING_CORRECTION;
+    sale.correctionRequest = JSON.stringify({
+      fields: keys,
+      returnStatus,
+    });
+    sale.odooReceptionSynced = false;
+    await this.salesRepository.saveWithoutDocuments(sale);
+    void this.syncReceptionToOdoo(sale.id).catch(() => undefined);
+
+    return {
+      id: sale.id,
+      status: sale.status,
+      fields: keys,
+    };
+  }
+
+  /** El vendedor guarda los datos marcados y la venta vuelve a su estatus anterior. */
+  async submitSellerCorrection(
+    id: number,
+    user: AuthUserPayload,
+    values: Record<string, unknown>,
+  ) {
+    const sale = await this.salesRepository.findByIdWithFiles(id);
+    if (!sale) throw new NotFoundException('Venta no encontrada');
+    this.assertSellerOwns(sale, user.userId);
+    if (sale.status !== SaleStatus.PENDING_CORRECTION) {
+      throw new BadRequestException('Esta venta no está por corregir');
+    }
+
+    const request = parseCorrectionRequest(sale.correctionRequest);
+    if (!request.fields.length) {
+      throw new BadRequestException('No hay campos marcados para corregir');
+    }
+
+    const payload = saleToPayload(sale) as unknown as Record<string, unknown>;
+    for (const key of request.fields) {
+      const def = correctionFieldByKey(key);
+      if (!def || !(key in (values || {}))) continue;
+      const incoming = values[key];
+      if (def.kind === 'document') {
+        const file = incoming as {
+          name?: string;
+          mime?: string;
+          dataBase64?: string;
+        } | null;
+        if (!file?.dataBase64) continue;
+        writePath(payload, key, {
+          name: file.name || def.label,
+          mime: file.mime || 'application/octet-stream',
+          dataBase64: file.dataBase64,
+        });
+        continue;
+      }
+      writePath(payload, key, incoming == null ? '' : String(incoming));
+      const companion = correctionCompanionKey(key);
+      if (companion && values?.[companion] != null && values[companion] !== '') {
+        const id = Number(values[companion]);
+        if (Number.isFinite(id) && id > 0) writePath(payload, companion, id);
+      }
+    }
+
+    applyPayloadToSale(sale, payload as never);
+    const next = Object.values(SaleStatus).includes(
+      request.returnStatus as SaleStatus,
+    )
+      ? (request.returnStatus as SaleStatus)
+      : SaleStatus.PENDING_VALIDATION;
+    sale.status =
+      next === SaleStatus.PENDING_CORRECTION
+        ? SaleStatus.PENDING_VALIDATION
+        : next;
+    sale.correctionRequest = '';
+    sale.odooReceptionSynced = false;
+    const saved = await this.salesRepository.save(sale);
+    void this.syncReceptionToOdoo(saved.id).catch(() => undefined);
+    return saleToPublic(saved);
+  }
+
   /** Desvincula la cotización Odoo sin rechazar la venta digital. */
   async clearOdooSaleOrderFromOdoo(id: number, reason: string) {
     await this.purgeExpired();
@@ -986,8 +1108,12 @@ export class SalesService {
   async createDraft(user: AuthUserPayload, dto: UpsertSaleDto) {
     await this.purgeExpired();
     const now = new Date();
-    const { draftLimit } = await this.settingsService.getDraftPolicy();
-    const count = await this.salesRepository.countActiveDrafts(user.userId, now);
+    const { draftLimit, draftTtlHours } = await this.settingsService.getDraftPolicy();
+    const count = await this.salesRepository.countActiveDrafts(
+      user.userId,
+      now,
+      draftTtlHours,
+    );
     if (count >= draftLimit) {
       throw new BadRequestException(
         `Solo puedes tener ${draftLimit} borradores. Elimina o envía uno antes de crear otro.`,
@@ -1060,7 +1186,9 @@ export class SalesService {
     this.applySellerCatalogNames(sale, seller);
     await this.assertDiscountAndSaldo(sale, user.userId);
     if (dto.titularName?.trim()) sale.titularName = dto.titularName.trim();
-    sale.draftExpiresAt = await this.draftExpiry();
+    if (!sale.draftExpiresAt && sale.createdAt) {
+      sale.draftExpiresAt = await this.draftExpiry(sale.createdAt);
+    }
     sale.folioSolicitud = formatDigitalFolio(sale.id);
     const saved = await this.salesRepository.save(sale);
     return saleToPublic(saved);
@@ -1130,7 +1258,7 @@ export class SalesService {
       await this.reservePreassignedSpace(saved);
     } catch (e) {
       saved.status = SaleStatus.DRAFT;
-      saved.draftExpiresAt = await this.draftExpiry();
+      saved.draftExpiresAt = await this.draftExpiry(saved.createdAt);
       await this.salesRepository.saveWithoutDocuments(saved);
       throw e;
     }
@@ -1394,7 +1522,7 @@ export class SalesService {
   async sendClientSignLink(
     id: number,
     user: AuthUserPayload,
-    frontUrl?: string,
+    frontCandidates?: Array<string | undefined>,
   ) {
     const sale = await this.salesRepository.findById(id);
     if (!sale) throw new NotFoundException('Venta no encontrada');
@@ -1419,7 +1547,7 @@ export class SalesService {
     await this.ticketNotifications.sendSignLink({
       customerName: titular,
       email,
-      signUrl: this.clientSignUrl(sale.id, frontUrl),
+      signUrl: this.clientSignUrl(sale.id, frontCandidates),
     });
 
     const seller = await this.usersRepository.findById(user.userId);
@@ -1465,12 +1593,24 @@ export class SalesService {
     }
   }
 
-  private resolveFrontBase(frontUrl?: string): string {
-    const fromClient = String(frontUrl || '')
-      .trim()
-      .replace(/\/+$/, '');
-    if (/^https?:\/\/[^\s/]+/i.test(fromClient)) {
-      return fromClient;
+  /** Origen http(s) de una URL o de un header Origin/Referer. */
+  private frontOrigin(raw?: string): string | null {
+    const value = String(raw || '').trim();
+    if (!value) return null;
+    try {
+      const url = new URL(value);
+      if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+      if (url.username || url.password) return null;
+      return url.origin;
+    } catch {
+      return null;
+    }
+  }
+
+  private resolveFrontBase(candidates?: Array<string | undefined>): string {
+    for (const raw of candidates ?? []) {
+      const origin = this.frontOrigin(raw);
+      if (origin) return origin;
     }
 
     if (this.config.get<string>('NODE_ENV') !== 'production') {
@@ -1482,8 +1622,11 @@ export class SalesService {
     );
   }
 
-  private clientSignUrl(saleId: number, frontUrl?: string): string {
-    const front = this.resolveFrontBase(frontUrl);
+  private clientSignUrl(
+    saleId: number,
+    frontCandidates?: Array<string | undefined>,
+  ): string {
+    const front = this.resolveFrontBase(frontCandidates);
     return `${front}/firmar/${encodeURIComponent(this.clientSignToken(saleId))}`;
   }
 

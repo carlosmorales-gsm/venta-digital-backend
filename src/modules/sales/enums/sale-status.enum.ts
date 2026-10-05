@@ -7,6 +7,8 @@ export enum SaleStatus {
   PENDING_SIGNATURE = 'PENDING_SIGNATURE',
   /** Firmada; falta cliente y/o cotización de Odoo. */
   PENDING_VALIDATION = 'PENDING_VALIDATION',
+  /** Mesa de Control pidió corregir datos o documentos. */
+  PENDING_CORRECTION = 'PENDING_CORRECTION',
   /** Firmada y con cliente + cotización Odoo. */
   COMPLETED = 'COMPLETED',
   /** Rechazada desde Odoo (sin cotización vinculada). */

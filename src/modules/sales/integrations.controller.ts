@@ -11,6 +11,7 @@ import { ApiKeyGuard } from '../../common/guards/api-key.guard';
 import { SetOdooPartnerDto } from './dto/set-odoo-partner.dto';
 import { SetOdooSaleOrderDto } from './dto/set-odoo-sale-order.dto';
 import { OdooRejectSaleDto } from './dto/odoo-reject-sale.dto';
+import { OdooCorrectionDto } from './dto/odoo-correction.dto';
 import { OdooClearSaleOrderDto } from './dto/odoo-clear-sale-order.dto';
 import { SalesService } from './sales.service';
 
@@ -66,6 +67,15 @@ export class IntegrationsController {
     @Body() dto: OdooRejectSaleDto,
   ) {
     return this.salesService.rejectFromOdoo(id, dto.reason);
+  }
+
+  /** Marca campos o documentos para que el vendedor los corrija. */
+  @Patch('sales/:id/correction')
+  requestCorrection(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() dto: OdooCorrectionDto,
+  ) {
+    return this.salesService.requestCorrectionFromOdoo(id, dto.fields);
   }
 
   /** Desvincula la cotización Odoo sin cancelar la venta digital. */

@@ -9,6 +9,7 @@ import { PlanKind } from '../enums/plan-kind.enum';
 import { SaleFormPayloadDto } from '../dto/sale-form.dto';
 import { normalizeMxPhone } from '../utils/phone';
 import { formatDigitalFolio } from '../utils/digital-folio';
+import { parseCorrectionRequest } from '../correction-fields';
 
 function s(v: unknown, fallback = ''): string {
   return v == null ? fallback : String(v).trim();
@@ -166,6 +167,7 @@ export function saleToPublic(sale: Sale) {
     updatedAt: toIso(sale.updatedAt) ?? '',
     driveFolderUrl: sale.driveFolderUrl,
     driveFolderPath: sale.driveFolderPath,
+    correctionFields: parseCorrectionRequest(sale.correctionRequest).fields,
     tipoVenta: tipoVentaFromEstatus(sale.estatus),
     recognizedBalance: recognizedFromVentas(sale.reconocimientoVentas),
     recognitionOriginIds: reconocimientoVentas
@@ -197,6 +199,7 @@ export function saleToListItem(sale: Sale) {
     promocionDescuento: sale.promocionDescuento ?? '',
     anticipo: sale.anticipo ?? '',
     saldo: sale.saldo ?? '',
+    correctionFields: parseCorrectionRequest(sale.correctionRequest).fields,
     payload: {},
   };
 }

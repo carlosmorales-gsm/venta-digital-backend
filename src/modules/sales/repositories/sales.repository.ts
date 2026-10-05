@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, LessThan, Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import { Sale } from '../entities/sale.entity';
 import { SaleDocument } from '../entities/sale-document.entity';
 import { SaleStatus } from '../enums/sale-status.enum';
@@ -16,6 +16,7 @@ const PEOPLE = {
 const LIST_STATUSES = [
   SaleStatus.COMPLETED,
   SaleStatus.PENDING_VALIDATION,
+  SaleStatus.PENDING_CORRECTION,
   SaleStatus.PENDING_SIGNATURE,
   SaleStatus.PENDING_PAYMENT,
   SaleStatus.REJECTED,
@@ -24,6 +25,7 @@ const LIST_STATUSES = [
 const CONCILIATION_STATUSES = [
   SaleStatus.COMPLETED,
   SaleStatus.PENDING_VALIDATION,
+  SaleStatus.PENDING_CORRECTION,
   SaleStatus.PENDING_SIGNATURE,
   SaleStatus.PENDING_PAYMENT,
 ];
@@ -163,22 +165,33 @@ export class SalesRepository {
     });
   }
 
-  countActiveDrafts(sellerId: number, now: Date): Promise<number> {
+  countActiveDrafts(sellerId: number, now: Date, ttlHours = 24): Promise<number> {
+    const hours = Number.isFinite(ttlHours) && ttlHours > 0 ? ttlHours : 24;
+    const cutoff = new Date(now.getTime() - hours * 60 * 60 * 1000);
     return this.repo
       .createQueryBuilder('s')
       .where('s.seller_id = :sellerId', { sellerId })
       .andWhere('s.status = :status', { status: SaleStatus.DRAFT })
+      .andWhere('s.created_at >= :cutoff', { cutoff })
       .andWhere('(s.draft_expires_at IS NULL OR s.draft_expires_at > :now)', {
         now,
       })
       .getCount();
   }
 
-  async deleteExpiredDrafts(now: Date): Promise<number> {
-    const result = await this.repo.delete({
-      status: SaleStatus.DRAFT,
-      draftExpiresAt: LessThan(now),
-    });
+  async deleteExpiredDrafts(now: Date, ttlHours: number): Promise<number> {
+    const hours = Number.isFinite(ttlHours) && ttlHours > 0 ? ttlHours : 24;
+    const cutoff = new Date(now.getTime() - hours * 60 * 60 * 1000);
+    const result = await this.repo
+      .createQueryBuilder()
+      .delete()
+      .from(Sale)
+      .where('status = :status', { status: SaleStatus.DRAFT })
+      .andWhere('(draft_expires_at < :now OR created_at < :cutoff)', {
+        now,
+        cutoff,
+      })
+      .execute();
     return result.affected ?? 0;
   }
 
