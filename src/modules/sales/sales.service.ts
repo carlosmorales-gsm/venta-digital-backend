@@ -10,7 +10,7 @@ import { SalesRepository } from './repositories/sales.repository';
 import { SaleStatus } from './enums/sale-status.enum';
 import { DocumentKind } from './enums/document-kind.enum';
 import { UsersRepository } from '../users/repositories/users.repository';
-import { AuditService } from '../audit/audit.service';
+import { AuditService, diffChanges } from '../audit/audit.service';
 import { AuditAction } from '../audit/enums/audit-action.enum';
 import { AuditEntityType } from '../audit/enums/audit-entity-type.enum';
 import { Sale } from './entities/sale.entity';
@@ -810,6 +810,7 @@ export class SalesService {
       entityId: sale.id,
       summary: `Odoo canceló venta #${sale.id} (${titular})`,
       details: {
+        kind: 'changes',
         before,
         after: saleToAuditSnapshot(sale),
         reason: trimmedReason,
@@ -859,6 +860,23 @@ export class SalesService {
     });
     sale.odooReceptionSynced = false;
     await this.salesRepository.saveWithoutDocuments(sale);
+    const titular =
+      sale.titularName || (sale.holder ? fullName(sale.holder) : '') || 'sin titular';
+    const campos = keys
+      .map((key) => correctionFieldByKey(key)?.label || key)
+      .join(', ');
+    await this.auditService.record({
+      actor: {
+        userId: null,
+        fullName: 'Odoo (Mesa de Control)',
+        type: 'INTEGRATION',
+      },
+      action: AuditAction.UPDATE,
+      entityType: AuditEntityType.SALE,
+      entityId: sale.id,
+      summary: `Mesa de Control mandó a corregir venta #${sale.id} (${titular})`,
+      details: { kind: 'note', campos },
+    });
     void this.syncReceptionToOdoo(sale.id).catch(() => undefined);
 
     return {
@@ -886,6 +904,7 @@ export class SalesService {
       throw new BadRequestException('No hay campos marcados para corregir');
     }
 
+    const beforeCorrection = saleToAuditSnapshot(sale);
     const payload = saleToPayload(sale) as unknown as Record<string, unknown>;
     for (const key of request.fields) {
       const def = correctionFieldByKey(key);
@@ -926,6 +945,29 @@ export class SalesService {
     sale.correctionRequest = '';
     sale.odooReceptionSynced = false;
     const saved = await this.salesRepository.save(sale);
+    const correctionChanges = diffChanges(
+      beforeCorrection,
+      saleToAuditSnapshot(saved),
+    );
+    if (Object.keys(correctionChanges).length) {
+      const seller = await this.usersRepository.findById(user.userId);
+      const titular =
+        saved.titularName ||
+        (saved.holder ? fullName(saved.holder) : '') ||
+        'sin titular';
+      await this.auditService.record({
+        actor: {
+          userId: user.userId,
+          fullName: seller?.fullName,
+          type: user.type,
+        },
+        action: AuditAction.UPDATE,
+        entityType: AuditEntityType.SALE,
+        entityId: saved.id,
+        summary: `Corrigió datos de venta #${saved.id} (${titular})`,
+        details: { kind: 'changes', changes: correctionChanges },
+      });
+    }
     void this.syncReceptionToOdoo(saved.id).catch(() => undefined);
     return saleToPublic(saved);
   }
@@ -972,8 +1014,9 @@ export class SalesService {
       action: AuditAction.UPDATE,
       entityType: AuditEntityType.SALE,
       entityId: sale.id,
-      summary: `Odoo desvinculó cotización de venta #${sale.id} (${titular})`,
+      summary: `Odoo desvinculó la cotización de venta #${sale.id} (${titular})`,
       details: {
+        kind: 'changes',
         before,
         after: saleToAuditSnapshot(sale),
         reason: trimmedReason,
@@ -1154,8 +1197,8 @@ export class SalesService {
       action: AuditAction.CREATE,
       entityType: AuditEntityType.SALE,
       entityId: saved.id,
-      summary: `${seller?.fullName ?? 'Vendedor'} guardó borrador de venta #${saved.id} (${titular})`,
-      details: { after: saleToAuditSnapshot(saved) },
+      summary: `Guardó borrador de venta #${saved.id} (${titular})`,
+      details: { kind: 'sale', after: saleToAuditSnapshot(saved) },
     });
 
     return saleToPublic(saved);
@@ -1181,6 +1224,7 @@ export class SalesService {
       }
     }
 
+    const beforeDraft = saleToAuditSnapshot(sale);
     applyPayloadToSale(sale, dto.payload);
     const seller = await this.usersRepository.findById(user.userId);
     this.applySellerCatalogNames(sale, seller);
@@ -1191,6 +1235,26 @@ export class SalesService {
     }
     sale.folioSolicitud = formatDigitalFolio(sale.id);
     const saved = await this.salesRepository.save(sale);
+    const afterDraft = saleToAuditSnapshot(saved);
+    const draftChanges = diffChanges(beforeDraft, afterDraft);
+    if (Object.keys(draftChanges).length) {
+      const titular =
+        saved.titularName ||
+        (saved.holder ? fullName(saved.holder) : '') ||
+        'sin titular';
+      await this.auditService.record({
+        actor: {
+          userId: user.userId,
+          fullName: seller?.fullName,
+          type: user.type,
+        },
+        action: AuditAction.UPDATE,
+        entityType: AuditEntityType.SALE,
+        entityId: saved.id,
+        summary: `Actualizó borrador de venta #${saved.id} (${titular})`,
+        details: { kind: 'changes', changes: draftChanges },
+      });
+    }
     return saleToPublic(saved);
   }
 
@@ -1289,8 +1353,8 @@ export class SalesService {
       action: id != null ? AuditAction.UPDATE : AuditAction.CREATE,
       entityType: AuditEntityType.SALE,
       entityId: saved.id,
-      summary: `${seller?.fullName ?? 'Vendedor'} finalizó captura de venta #${saved.id} (${titular})`,
-      details: { after: saleToAuditSnapshot(saved) },
+      summary: `Generó venta nueva #${saved.id} (${titular})`,
+      details: { kind: 'sale', after: saleToAuditSnapshot(saved) },
     });
 
     const odooSync = await this.syncReceptionToOdoo(saved.id);
@@ -1491,8 +1555,20 @@ export class SalesService {
       action: AuditAction.UPDATE,
       entityType: AuditEntityType.SALE,
       entityId: sale.id,
-      summary: `${seller?.fullName ?? 'Vendedor'} registró pago de venta #${sale.id} (${titular})`,
-      details: { after: saleToAuditSnapshot(sale) },
+      summary: `Generó pago de venta #${sale.id} (${titular})`,
+      details: {
+        kind: 'payment',
+        formaPago: sale.formaPago,
+        montoRecibido: sale.montoRecibido,
+        cambio: sale.cambio,
+        anticipo: sale.anticipo,
+        pagoInicial: sale.pagoInicial,
+        frecuencia: sale.frecuencia,
+        banco: sale.bancoPago || sale.banco,
+        cuenta: sale.cuentaPago || sale.cuenta,
+        amount: Number(sale.amount) || 0,
+        status: sale.status,
+      },
     });
 
     const odooSync = await this.syncReceptionToOdoo(sale.id);
@@ -1560,8 +1636,8 @@ export class SalesService {
       action: AuditAction.UPDATE,
       entityType: AuditEntityType.SALE,
       entityId: sale.id,
-      summary: `${seller?.fullName ?? 'Vendedor'} envió el enlace de firma de venta #${sale.id} (${titular})`,
-      details: { email },
+      summary: `Envió correo de firma al titular de venta #${sale.id} (${titular})`,
+      details: { kind: 'email', correo: email },
     });
 
     return { ok: true };
@@ -1676,6 +1752,7 @@ export class SalesService {
         'Solo se puede firmar cuando el pago ya fue registrado',
       );
     }
+    const beforeStatus = sale.status;
     if (!dto.firmaCliente?.dataBase64) {
       throw new BadRequestException('La firma es obligatoria');
     }
@@ -1985,8 +2062,13 @@ export class SalesService {
       entityId: sale.id,
       summary: viaClientLink
         ? `El titular firmó venta #${sale.id} (${titular}) desde el enlace del correo`
-        : `${seller?.fullName ?? 'Vendedor'} firmó venta #${sale.id} (${titular})`,
-      details: { after: saleToAuditSnapshot(sale) },
+        : `Firmó venta #${sale.id} (${titular})`,
+      details: {
+        kind: 'sign',
+        changes: {
+          status: { from: beforeStatus, to: sale.status },
+        },
+      },
     });
 
     void this.syncReceptionToOdoo(sale.id).then((odooSync) => {
@@ -2022,8 +2104,8 @@ export class SalesService {
       action: AuditAction.DELETE,
       entityType: AuditEntityType.SALE,
       entityId: id,
-      summary: `${seller?.fullName ?? 'Vendedor'} eliminó borrador de venta #${id} (${titular})`,
-      details: { after: snapshot },
+      summary: `Eliminó borrador de venta #${id} (${titular})`,
+      details: { kind: 'delete', after: snapshot },
     });
 
     return { ok: true };
