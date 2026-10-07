@@ -625,15 +625,22 @@ export function applyPayloadToSale(sale: Sale, payload: SaleFormPayloadDto) {
   const preasig = Boolean(plan.preasignacion);
   sale.preasignacion = sale.planKind === PlanKind.PARQUE && preasig;
   sale.withoutInterest = Boolean(plan.withoutInterest);
-  if (sale.preasignacion) {
+  if (sale.planKind === PlanKind.PARQUE) {
     sale.seccion = s(plan.seccion);
-    sale.cuadrante = s(plan.cuadrante);
-    sale.numero = s(plan.numero);
     sale.parqueFuneral = s(plan.parqueFuneral);
     sale.parkId = optionalInt(plan.parkId);
     sale.sectionId = optionalInt(plan.sectionId);
-    sale.quadrantId = optionalInt(plan.quadrantId);
-    sale.spaceId = optionalInt(plan.spaceId);
+    if (sale.preasignacion) {
+      sale.cuadrante = s(plan.cuadrante);
+      sale.numero = s(plan.numero);
+      sale.quadrantId = optionalInt(plan.quadrantId);
+      sale.spaceId = optionalInt(plan.spaceId);
+    } else {
+      sale.cuadrante = '';
+      sale.numero = '';
+      sale.quadrantId = null;
+      sale.spaceId = null;
+    }
   } else {
     sale.seccion = '';
     sale.cuadrante = '';

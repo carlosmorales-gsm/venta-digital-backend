@@ -9,6 +9,8 @@ export enum SaleStatus {
   PENDING_VALIDATION = 'PENDING_VALIDATION',
   /** Mesa de Control pidió corregir datos o documentos. */
   PENDING_CORRECTION = 'PENDING_CORRECTION',
+  /** El vendedor ya reenvió la corrección; Mesa debe aceptarla o rechazarla. */
+  PENDING_CORRECTION_REVIEW = 'PENDING_CORRECTION_REVIEW',
   /** Firmada y con cliente + cotización Odoo. */
   COMPLETED = 'COMPLETED',
   /** Rechazada desde Odoo (sin cotización vinculada). */

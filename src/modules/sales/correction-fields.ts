@@ -8,9 +8,18 @@ export type CorrectionFieldDef = {
   kind: CorrectionKind;
 };
 
+export type CorrectionReviewItem = {
+  key: string;
+  label: string;
+  previous: string;
+  next: string;
+};
+
 export type CorrectionRequest = {
   fields: string[];
   returnStatus: string;
+  previous: Record<string, string>;
+  review: CorrectionReviewItem[];
 };
 
 const field = (
@@ -40,10 +49,7 @@ const doc = (
 export const CORRECTION_FIELDS: CorrectionFieldDef[] = [
   field('contrato', 'Contrato', 'meta.origenVenta', 'Origen de venta'),
   field('contrato', 'Contrato', 'meta.branchName', 'Sucursal'),
-  field('contrato', 'Contrato', 'meta.serviceTypeName', 'Tipo de servicio'),
-  field('contrato', 'Contrato', 'meta.folioSolicitud', 'Folio de solicitud'),
   field('contrato', 'Contrato', 'meta.fechaServicio', 'Fecha de servicio'),
-  field('contrato', 'Contrato', 'meta.tipoVenta', 'Tipo de venta'),
 
   field('contacto', 'Datos de contacto', 'contacto.nombres', 'Nombre(s)'),
   field('contacto', 'Datos de contacto', 'contacto.apellidoPaterno', 'Apellido paterno'),
@@ -53,7 +59,6 @@ export const CORRECTION_FIELDS: CorrectionFieldDef[] = [
   field('contacto', 'Datos de contacto', 'contacto.fechaNacimiento', 'Fecha de nacimiento'),
   field('contacto', 'Datos de contacto', 'contacto.estadoCivil', 'Estado civil'),
   field('contacto', 'Datos de contacto', 'contacto.celular1', 'Celular 1'),
-  field('contacto', 'Datos de contacto', 'contacto.celular2', 'Celular 2'),
   field('contacto', 'Datos de contacto', 'contacto.correo', 'Correo'),
   field('contacto', 'Datos de contacto', 'contacto.direccion', 'Dirección'),
   field('contacto', 'Datos de contacto', 'contacto.colonia', 'Colonia'),
@@ -116,16 +121,78 @@ export const CORRECTION_FIELDS: CorrectionFieldDef[] = [
   field('pago', 'Pago', 'pago.empresaNomina', 'Empresa de convenio'),
   field('pago', 'Pago', 'pago.numeroEmpleado', 'Número de empleado'),
 
-  doc('inePdf', 'INE'),
+  doc('ine', 'INE'),
+  doc('tarjeta', 'Tarjeta'),
   doc('comprobanteDomicilio', 'Comprobante de domicilio'),
   doc('constanciaSituacionFiscal', 'Constancia de situación fiscal'),
-  doc('tarjetaPdf', 'Tarjeta'),
   doc('reciboNomina', 'Recibo de nómina'),
   doc('domiciliacionBanorte', 'Domiciliación Banorte'),
-  doc('firmaCliente', 'Firma del cliente'),
-  doc('ticketPago', 'Ticket de pago'),
   doc('comprobanteTransferencia', 'Comprobante de transferencia'),
 ];
+
+/** Datos y archivos que Mesa de Control puede pedir de nuevo. */
+export const CORRECTION_KEYS = CORRECTION_FIELDS.map((item) => item.key);
+
+const DOCUMENT_PAIRS: Array<[string, string]> = [
+  ['documentos.ineFrente', 'documentos.ineReverso'],
+  ['documentos.tarjetaFrente', 'documentos.tarjetaReverso'],
+];
+
+/** INE y tarjeta siempre incluyen frente y reverso. */
+export function expandCorrectionDocumentKeys(keys: string[]): string[] {
+  const set = new Set(keys);
+  for (const [front, back] of DOCUMENT_PAIRS) {
+    if (set.has(front) || set.has(back)) {
+      set.add(front);
+      set.add(back);
+    }
+  }
+  return [...set];
+}
+
+export type CorrectionFileTarget = {
+  saveKey: string;
+  label: string;
+};
+
+/**
+ * Odoo pide “INE” o “Tarjeta” como un solo archivo.
+ * Aquí se abre en frente y reverso, que son los archivos que se guardan.
+ */
+export function correctionFileTargets(keys: string[]): CorrectionFileTarget[] {
+  const targets: CorrectionFileTarget[] = [];
+  const seen = new Set<string>();
+  const push = (saveKey: string, label: string) => {
+    if (seen.has(saveKey)) return;
+    seen.add(saveKey);
+    targets.push({ saveKey, label });
+  };
+  for (const key of keys) {
+    if (
+      key === 'documentos.ine' ||
+      key === 'documentos.inePdf' ||
+      key === 'documentos.ineFrente' ||
+      key === 'documentos.ineReverso'
+    ) {
+      push('documentos.ineFrente', 'INE (frente)');
+      push('documentos.ineReverso', 'INE (reverso)');
+      continue;
+    }
+    if (
+      key === 'documentos.tarjeta' ||
+      key === 'documentos.tarjetaPdf' ||
+      key === 'documentos.tarjetaFrente' ||
+      key === 'documentos.tarjetaReverso'
+    ) {
+      push('documentos.tarjetaFrente', 'Tarjeta (frente)');
+      push('documentos.tarjetaReverso', 'Tarjeta (reverso)');
+      continue;
+    }
+    const def = correctionFieldByKey(key);
+    if (def?.kind === 'document') push(key, def.label);
+  }
+  return targets;
+}
 
 const FIELD_BY_KEY = new Map(CORRECTION_FIELDS.map((item) => [item.key, item]));
 
@@ -134,18 +201,43 @@ export function correctionFieldByKey(key: string): CorrectionFieldDef | undefine
 }
 
 export function parseCorrectionRequest(raw: string | null | undefined): CorrectionRequest {
-  if (!raw?.trim()) return { fields: [], returnStatus: '' };
+  const empty: CorrectionRequest = {
+    fields: [],
+    returnStatus: '',
+    previous: {},
+    review: [],
+  };
+  if (!raw?.trim()) return empty;
   try {
     const parsed = JSON.parse(raw) as Partial<CorrectionRequest>;
     const fields = Array.isArray(parsed.fields)
       ? parsed.fields.map((item) => String(item || '').trim()).filter(Boolean)
       : [];
+    const previous: Record<string, string> = {};
+    if (parsed.previous && typeof parsed.previous === 'object') {
+      for (const [key, value] of Object.entries(parsed.previous)) {
+        const name = String(value ?? '').trim();
+        if (key.trim() && name) previous[key.trim()] = name;
+      }
+    }
+    const review = Array.isArray(parsed.review)
+      ? parsed.review
+          .map((item) => ({
+            key: String(item?.key || '').trim(),
+            label: String(item?.label || '').trim(),
+            previous: String(item?.previous || '').trim() || '—',
+            next: String(item?.next || '').trim() || '—',
+          }))
+          .filter((item) => item.key && item.label)
+      : [];
     return {
       fields,
       returnStatus: String(parsed.returnStatus || '').trim(),
+      previous,
+      review,
     };
   } catch {
-    return { fields: [], returnStatus: '' };
+    return empty;
   }
 }
 

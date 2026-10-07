@@ -23,6 +23,7 @@ import { AuditService } from '../audit/audit.service';
 import { AuditAction } from '../audit/enums/audit-action.enum';
 import { AuditEntityType } from '../audit/enums/audit-entity-type.enum';
 import { AuthUserPayload } from '../../common/decorators/current-user.decorator';
+import { SettingsService } from '../settings/settings.service';
 
 export interface SessionUserView {
   id: number;
@@ -66,6 +67,7 @@ export class AuthService {
     private readonly whatsapp: WhatsappService,
     private readonly config: ConfigService,
     private readonly auditService: AuditService,
+    private readonly settingsService: SettingsService,
   ) {}
 
   private get businessTimezone(): string {
@@ -99,6 +101,11 @@ export class AuthService {
   async loginSellerDev(cellphone: string): Promise<AuthTokensResponse> {
     if (!this.isDevAuthBypass()) {
       throw new UnauthorizedException('Login de desarrollo no disponible');
+    }
+    if ((await this.settingsService.getSellerAccessMode()).passwordLogin) {
+      throw new UnauthorizedException(
+        'Entra con la contraseña definida por el administrador',
+      );
     }
 
     const seller =
@@ -151,10 +158,20 @@ export class AuthService {
     return this.issueSellerSession(seller, actor.userId);
   }
 
+  sellerAccessMode() {
+    return this.settingsService.getSellerAccessMode();
+  }
+
   /**
    * Paso 1 vendedor: valida celular activo y solicita PIN por WhatsApp.
    */
   async requestSellerPin(cellphone: string) {
+    if ((await this.settingsService.getSellerAccessMode()).passwordLogin) {
+      throw new BadRequestException(
+        'El acceso de vendedor es con la contraseña definida por el administrador',
+      );
+    }
+
     const seller =
       await this.usersRepository.findActiveSellerByCellphone(cellphone);
 
@@ -183,6 +200,12 @@ export class AuthService {
    * Paso 2 vendedor: valida PIN y emite JWT que expira al fin del día.
    */
   async verifySellerPin(dto: VerifySellerPinDto): Promise<AuthTokensResponse> {
+    if ((await this.settingsService.getSellerAccessMode()).passwordLogin) {
+      throw new BadRequestException(
+        'El acceso de vendedor es con la contraseña definida por el administrador',
+      );
+    }
+
     const valid = await this.whatsapp.verifyNip(dto.nipId, dto.nip);
     if (!valid) {
       throw new UnauthorizedException('PIN inválido o expirado');
@@ -195,6 +218,38 @@ export class AuthService {
 
     if (!seller) {
       throw new UnauthorizedException('Vendedor no encontrado o inactivo');
+    }
+
+    return this.issueSellerSession(seller);
+  }
+
+  /**
+   * Vendedor: celular registrado + contraseña compartida del administrador.
+   */
+  async loginSellerWithPassword(
+    cellphone: string,
+    password: string,
+  ): Promise<AuthTokensResponse> {
+    const mode = await this.settingsService.getSellerAccessMode();
+    if (!mode.passwordLogin) {
+      if (mode.expired) {
+        throw new UnauthorizedException(
+          'La contraseña de vendedores ya venció',
+        );
+      }
+      throw new BadRequestException('El acceso de vendedor es con PIN de WhatsApp');
+    }
+
+    const seller =
+      await this.usersRepository.findActiveSellerByCellphoneWithPermissions(
+        cellphone,
+      );
+    const passwordOk = await this.settingsService.assertSellerPassword(password);
+    if (passwordOk.ok === false && passwordOk.expired) {
+      throw new UnauthorizedException('La contraseña de vendedores ya venció');
+    }
+    if (!seller || !passwordOk.ok) {
+      throw new UnauthorizedException('Celular o contraseña incorrectos');
     }
 
     return this.issueSellerSession(seller);

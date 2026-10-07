@@ -523,6 +523,50 @@ export class OdooGsmClient {
     }
   }
 
+  async syncVdReceptionBatch(
+    payloads: Array<Record<string, unknown>>,
+  ): Promise<
+    Array<{
+      id?: number;
+      receptionId?: number;
+      created?: boolean;
+      updated?: boolean;
+      ok?: boolean;
+      error?: string;
+    }>
+  > {
+    if (!this.http) {
+      throw new ServiceUnavailableException(
+        'Integración Odoo no configurada (API_ODOO_GSM_URL)',
+      );
+    }
+    if (!payloads.length) return [];
+    try {
+      const { data } = await this.http.post<{
+        items?: Array<{
+          id?: number;
+          receptionId?: number;
+          created?: boolean;
+          updated?: boolean;
+          ok?: boolean;
+          error?: string;
+        }>;
+      }>('/expedientes/venta-digital/lote', { items: payloads }, {
+        timeout: 600000,
+      });
+      return data?.items ?? [];
+    } catch (e: any) {
+      const msg =
+        e?.response?.data?.message ||
+        e?.message ||
+        'No se pudo guardar el lote de expedientes en Odoo';
+      this.logger.error(`syncVdReceptionBatch: ${msg}`);
+      throw new ServiceUnavailableException(
+        typeof msg === 'string' ? msg : 'No se pudo guardar el lote de expedientes en Odoo',
+      );
+    }
+  }
+
   async reserveSpace(input: {
     spaceId: number;
     folio: string;

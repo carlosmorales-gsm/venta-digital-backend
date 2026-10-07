@@ -16,6 +16,7 @@ import { RefreshTokenDto } from './dto/refresh-token.dto';
 import { LogoutDto } from './dto/logout.dto';
 import { ChangePasswordDto } from './dto/change-password.dto';
 import { ImpersonateSellerDto } from './dto/impersonate-seller.dto';
+import { SellerPasswordLoginDto } from './dto/seller-password-login.dto';
 import {
   CurrentUser,
   AuthUserPayload,
@@ -27,6 +28,19 @@ import { UserType } from '../../common/enums/user-type.enum';
 @Controller('auth')
 export class AuthController {
   constructor(private readonly authService: AuthService) {}
+
+  /** Público: si los vendedores entran con contraseña o con PIN de WhatsApp. */
+  @Get('vendedor/modo-acceso')
+  sellerAccessMode() {
+    return this.authService.sellerAccessMode();
+  }
+
+  /** Vendedor — celular + contraseña definida por el administrador inicial. */
+  @Post('vendedor/login-password')
+  @HttpCode(HttpStatus.OK)
+  loginSellerPassword(@Body() dto: SellerPasswordLoginDto) {
+    return this.authService.loginSellerWithPassword(dto.cellphone, dto.password);
+  }
 
   /** Vendedor — solicita PIN WhatsApp */
   @Post('vendedor/solicitar-pin')

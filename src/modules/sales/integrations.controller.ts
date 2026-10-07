@@ -78,6 +78,22 @@ export class IntegrationsController {
     return this.salesService.requestCorrectionFromOdoo(id, dto.fields);
   }
 
+  /** Corrección reenviada por el vendedor, pendiente de aceptar o rechazar. */
+  @Get('sales/:id/correction-review')
+  correctionReview(@Param('id', ParseIntPipe) id: number) {
+    return this.salesService.getCorrectionReview(id);
+  }
+
+  @Patch('sales/:id/correction-review/accept')
+  acceptCorrectionReview(@Param('id', ParseIntPipe) id: number) {
+    return this.salesService.acceptCorrectionReview(id);
+  }
+
+  @Patch('sales/:id/correction-review/reject')
+  rejectCorrectionReview(@Param('id', ParseIntPipe) id: number) {
+    return this.salesService.rejectCorrectionReview(id);
+  }
+
   /** Desvincula la cotización Odoo sin cancelar la venta digital. */
   @Patch('sales/:id/sale-order/clear')
   clearSaleOrder(

@@ -272,7 +272,7 @@ export class SavePaymentDto {
   @Type(() => SaleAttachmentDto)
   ticketPdf?: SaleAttachmentDto | null;
 
-  /** Foto o PDF del pago por transferencia. */
+  /** Foto o PDF del pago en transferencia o en efectivo. */
   @IsOptional()
   @ValidateNested()
   @Type(() => SaleAttachmentDto)

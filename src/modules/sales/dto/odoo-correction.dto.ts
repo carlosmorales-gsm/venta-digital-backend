@@ -1,7 +1,7 @@
 import { IsArray, ArrayMinSize, IsIn, IsString } from 'class-validator';
-import { CORRECTION_FIELDS } from '../correction-fields';
+import { CORRECTION_KEYS } from '../correction-fields';
 
-const KEYS = CORRECTION_FIELDS.map((item) => item.key);
+const KEYS = CORRECTION_KEYS;
 
 export class OdooCorrectionDto {
   @IsArray()
