@@ -1,5 +1,5 @@
 import { NestFactory } from '@nestjs/core';
-import { RequestMethod, ValidationPipe } from '@nestjs/common';
+import { Logger, RequestMethod, ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { json, urlencoded } from 'express';
 import * as os from 'os';
@@ -19,14 +19,25 @@ function lanIpv4Addresses(): string[] {
   return ips;
 }
 
+const httpLogger = new Logger('HTTP');
+
+function requestPath(url: string): string {
+  const path = String(url || '').split('?')[0];
+  return path.replace(/(\/public\/sign\/)[^/]+/, '$1:token');
+}
+
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, { bodyParser: false });
   app.enableShutdownHooks();
 
-  // Adjuntos (INE / comprobante) viajan en base64 dentro del JSON
-  // Fotos de celular ~5 MB c/u → base64 + 2 archivos requiere más margen
-  app.use(json({ limit: '25mb' }));
-  app.use(urlencoded({ extended: true, limit: '25mb' }));
+  app.use((req, _res, next) => {
+    httpLogger.log(`${req.method} ${requestPath(req.originalUrl || req.url)}`);
+    next();
+  });
+
+  // Adjuntos (INE / comprobante / PDFs) viajan en base64 dentro del JSON
+  app.use(json({ limit: '200mb' }));
+  app.use(urlencoded({ extended: true, limit: '200mb' }));
 
   app.enableCors({
     origin: true,

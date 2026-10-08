@@ -4,6 +4,7 @@ import {
   Delete,
   ForbiddenException,
   Get,
+  Headers,
   Param,
   ParseIntPipe,
   Patch,
@@ -27,6 +28,8 @@ import {
   SignSaleDto,
   UpsertSaleDto,
 } from './dto/sale-form.dto';
+import { SubmitCorrectionDto } from './dto/submit-correction.dto';
+import { SendSignLinkDto } from './dto/send-sign-link.dto';
 
 @Controller('sales')
 @UseGuards(AuthGuard('jwt'), RolesGuard, PermissionsGuard)
@@ -143,8 +146,25 @@ export class SalesController {
   sendSignLink(
     @Param('id', ParseIntPipe) id: number,
     @CurrentUser() user: AuthUserPayload,
+    @Body() dto: SendSignLinkDto,
+    @Headers('origin') origin?: string,
+    @Headers('referer') referer?: string,
   ) {
-    return this.salesService.sendClientSignLink(id, user);
+    return this.salesService.sendClientSignLink(id, user, [
+      dto.frontUrl,
+      origin,
+      referer,
+    ]);
+  }
+
+  @Post(':id/correction')
+  @Roles(UserType.VENDEDOR)
+  submitCorrection(
+    @Param('id', ParseIntPipe) id: number,
+    @CurrentUser() user: AuthUserPayload,
+    @Body() dto: SubmitCorrectionDto,
+  ) {
+    return this.salesService.submitSellerCorrection(id, user, dto.values);
   }
 
   @Post(':id/sign')

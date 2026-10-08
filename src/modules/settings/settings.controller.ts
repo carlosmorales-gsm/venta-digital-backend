@@ -25,9 +25,11 @@ export class SettingsController {
   /** Configuración completa — solo ADMIN. */
   @Get()
   @Roles(UserType.ADMIN)
-  async get() {
+  async get(@CurrentUser() user: AuthUserPayload) {
     const s = await this.settingsService.get();
-    return this.settingsService.toPublic(s);
+    const canManageSellerAccess =
+      await this.settingsService.isDefaultAdmin(user.userId);
+    return this.settingsService.toPublic(s, canManageSellerAccess);
   }
 
   @Patch()
@@ -37,6 +39,8 @@ export class SettingsController {
     @CurrentUser() user: AuthUserPayload,
   ) {
     const s = await this.settingsService.update(dto, user);
-    return this.settingsService.toPublic(s);
+    const canManageSellerAccess =
+      await this.settingsService.isDefaultAdmin(user.userId);
+    return this.settingsService.toPublic(s, canManageSellerAccess);
   }
 }

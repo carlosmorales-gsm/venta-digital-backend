@@ -2,6 +2,7 @@ import {
   Injectable,
   UnauthorizedException,
   BadRequestException,
+  ForbiddenException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
@@ -18,6 +19,11 @@ import { VerifySellerPinDto } from './dto/verify-seller-pin.dto';
 import { MonitorLoginDto } from './dto/monitor-login.dto';
 import { UsersRepository } from '../users/repositories/users.repository';
 import { RefreshTokensRepository } from '../users/repositories/refresh-tokens.repository';
+import { AuditService } from '../audit/audit.service';
+import { AuditAction } from '../audit/enums/audit-action.enum';
+import { AuditEntityType } from '../audit/enums/audit-entity-type.enum';
+import { AuthUserPayload } from '../../common/decorators/current-user.decorator';
+import { SettingsService } from '../settings/settings.service';
 
 export interface SessionUserView {
   id: number;
@@ -60,6 +66,8 @@ export class AuthService {
     private readonly jwtService: JwtService,
     private readonly whatsapp: WhatsappService,
     private readonly config: ConfigService,
+    private readonly auditService: AuditService,
+    private readonly settingsService: SettingsService,
   ) {}
 
   private get businessTimezone(): string {
@@ -94,6 +102,11 @@ export class AuthService {
     if (!this.isDevAuthBypass()) {
       throw new UnauthorizedException('Login de desarrollo no disponible');
     }
+    if ((await this.settingsService.getSellerAccessMode()).passwordLogin) {
+      throw new UnauthorizedException(
+        'Entra con la contraseña definida por el administrador',
+      );
+    }
 
     const seller =
       await this.usersRepository.findActiveSellerByCellphoneWithPermissions(
@@ -103,29 +116,62 @@ export class AuthService {
       throw new UnauthorizedException('Vendedor no encontrado o inactivo');
     }
 
-    const expiresInSeconds = secondsUntilEndOfDay(this.businessTimezone);
-    const permissions = this.permissionCodes(seller);
-    const accessToken = this.jwtService.sign(
-      {
-        sub: seller.id,
-        type: seller.type,
-        permissions,
-        tokenUse: 'access',
-      },
-      { expiresIn: expiresInSeconds },
-    );
+    return this.issueSellerSession(seller);
+  }
 
-    return {
-      accessToken,
-      expiresAt: endOfDayUtcIso(this.businessTimezone),
-      user: this.toUserView(seller),
-    };
+  /**
+   * Admin: entra como un vendedor activo (JWT de vendedor hasta fin del día).
+   * No revoca el refresh del administrador.
+   */
+  async enterAsSeller(
+    actor: AuthUserPayload,
+    sellerId: number,
+  ): Promise<AuthTokensResponse> {
+    if (actor.type !== UserType.ADMIN) {
+      throw new ForbiddenException('Solo un administrador puede entrar como vendedor');
+    }
+
+    const seller =
+      await this.usersRepository.findActiveByIdWithPermissions(sellerId);
+
+    if (!seller || seller.type !== UserType.VENDEDOR) {
+      throw new BadRequestException('Selecciona un vendedor activo');
+    }
+
+    const admin = await this.usersRepository.findById(actor.userId);
+    await this.auditService.record({
+      actor: {
+        userId: actor.userId,
+        fullName: admin?.fullName ?? null,
+        type: actor.type,
+      },
+      action: AuditAction.APPLY,
+      entityType: AuditEntityType.USER,
+      entityId: seller.id,
+      summary: `Entró como vendedor ${seller.fullName}`,
+      details: {
+        sellerId: seller.id,
+        sellerName: seller.fullName,
+      },
+    });
+
+    return this.issueSellerSession(seller, actor.userId);
+  }
+
+  sellerAccessMode() {
+    return this.settingsService.getSellerAccessMode();
   }
 
   /**
    * Paso 1 vendedor: valida celular activo y solicita PIN por WhatsApp.
    */
   async requestSellerPin(cellphone: string) {
+    if ((await this.settingsService.getSellerAccessMode()).passwordLogin) {
+      throw new BadRequestException(
+        'El acceso de vendedor es con la contraseña definida por el administrador',
+      );
+    }
+
     const seller =
       await this.usersRepository.findActiveSellerByCellphone(cellphone);
 
@@ -154,6 +200,12 @@ export class AuthService {
    * Paso 2 vendedor: valida PIN y emite JWT que expira al fin del día.
    */
   async verifySellerPin(dto: VerifySellerPinDto): Promise<AuthTokensResponse> {
+    if ((await this.settingsService.getSellerAccessMode()).passwordLogin) {
+      throw new BadRequestException(
+        'El acceso de vendedor es con la contraseña definida por el administrador',
+      );
+    }
+
     const valid = await this.whatsapp.verifyNip(dto.nipId, dto.nip);
     if (!valid) {
       throw new UnauthorizedException('PIN inválido o expirado');
@@ -168,15 +220,54 @@ export class AuthService {
       throw new UnauthorizedException('Vendedor no encontrado o inactivo');
     }
 
+    return this.issueSellerSession(seller);
+  }
+
+  /**
+   * Vendedor: celular registrado + contraseña compartida del administrador.
+   */
+  async loginSellerWithPassword(
+    cellphone: string,
+    password: string,
+  ): Promise<AuthTokensResponse> {
+    const mode = await this.settingsService.getSellerAccessMode();
+    if (!mode.passwordLogin) {
+      if (mode.expired) {
+        throw new UnauthorizedException(
+          'La contraseña de vendedores ya venció',
+        );
+      }
+      throw new BadRequestException('El acceso de vendedor es con PIN de WhatsApp');
+    }
+
+    const seller =
+      await this.usersRepository.findActiveSellerByCellphoneWithPermissions(
+        cellphone,
+      );
+    const passwordOk = await this.settingsService.assertSellerPassword(password);
+    if (passwordOk.ok === false && passwordOk.expired) {
+      throw new UnauthorizedException('La contraseña de vendedores ya venció');
+    }
+    if (!seller || !passwordOk.ok) {
+      throw new UnauthorizedException('Celular o contraseña incorrectos');
+    }
+
+    return this.issueSellerSession(seller);
+  }
+
+  private issueSellerSession(
+    seller: User,
+    impersonatedBy?: number,
+  ): AuthTokensResponse {
     const expiresInSeconds = secondsUntilEndOfDay(this.businessTimezone);
     const permissions = this.permissionCodes(seller);
-
     const accessToken = this.jwtService.sign(
       {
         sub: seller.id,
         type: seller.type,
         permissions,
         tokenUse: 'access',
+        ...(impersonatedBy ? { impersonatedBy } : {}),
       },
       { expiresIn: expiresInSeconds },
     );

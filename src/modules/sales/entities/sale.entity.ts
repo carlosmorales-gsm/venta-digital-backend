@@ -261,6 +261,10 @@ export class Sale {
   @Column({ name: 'draft_expires_at', type: 'timestamptz', nullable: true })
   draftExpiresAt!: Date | null;
 
+  /** JSON: { fields: string[], returnStatus: string } */
+  @Column({ name: 'correction_request', type: 'text', default: '' })
+  correctionRequest!: string;
+
   @OneToOne(() => SaleHolder, (h) => h.sale, { cascade: true })
   holder!: SaleHolder | null;
 

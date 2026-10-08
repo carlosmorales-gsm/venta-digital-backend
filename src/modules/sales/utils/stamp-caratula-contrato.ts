@@ -70,6 +70,24 @@ export const CONTRATO_STAMPS: Partial<Record<DocumentKind, PdfTextStamp>> = {
     maxW: 118,
     fontSize: 9,
   },
+  [DocumentKind.CARTA_FACTURA]: {
+    pageIndex: 0,
+    x: 100,
+    y: 74,
+    boxTop: 62,
+    boxH: 16,
+    maxW: 120,
+    fontSize: 9,
+  },
+  [DocumentKind.CARTA_NO_FACTURA]: {
+    pageIndex: 0,
+    x: 100,
+    y: 74,
+    boxTop: 62,
+    boxH: 16,
+    maxW: 120,
+    fontSize: 9,
+  },
 };
 
 const DEFAULT_PAGE_H = 1009.13;

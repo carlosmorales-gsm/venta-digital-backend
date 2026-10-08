@@ -9,6 +9,7 @@ import { PlanKind } from '../enums/plan-kind.enum';
 import { SaleFormPayloadDto } from '../dto/sale-form.dto';
 import { normalizeMxPhone } from '../utils/phone';
 import { formatDigitalFolio } from '../utils/digital-folio';
+import { parseCorrectionRequest } from '../correction-fields';
 
 function s(v: unknown, fallback = ''): string {
   return v == null ? fallback : String(v).trim();
@@ -50,7 +51,7 @@ function tipoVentaFromEstatus(estatus: string): string {
   return 'NUEVA';
 }
 
-function parseReconocimientoVentas(raw: string | null | undefined) {
+export function parseReconocimientoVentas(raw: string | null | undefined) {
   if (!raw?.trim()) return [];
   try {
     const parsed = JSON.parse(raw);
@@ -166,6 +167,7 @@ export function saleToPublic(sale: Sale) {
     updatedAt: toIso(sale.updatedAt) ?? '',
     driveFolderUrl: sale.driveFolderUrl,
     driveFolderPath: sale.driveFolderPath,
+    correctionFields: parseCorrectionRequest(sale.correctionRequest).fields,
     tipoVenta: tipoVentaFromEstatus(sale.estatus),
     recognizedBalance: recognizedFromVentas(sale.reconocimientoVentas),
     recognitionOriginIds: reconocimientoVentas
@@ -197,6 +199,7 @@ export function saleToListItem(sale: Sale) {
     promocionDescuento: sale.promocionDescuento ?? '',
     anticipo: sale.anticipo ?? '',
     saldo: sale.saldo ?? '',
+    correctionFields: parseCorrectionRequest(sale.correctionRequest).fields,
     payload: {},
   };
 }
@@ -622,15 +625,22 @@ export function applyPayloadToSale(sale: Sale, payload: SaleFormPayloadDto) {
   const preasig = Boolean(plan.preasignacion);
   sale.preasignacion = sale.planKind === PlanKind.PARQUE && preasig;
   sale.withoutInterest = Boolean(plan.withoutInterest);
-  if (sale.preasignacion) {
+  if (sale.planKind === PlanKind.PARQUE) {
     sale.seccion = s(plan.seccion);
-    sale.cuadrante = s(plan.cuadrante);
-    sale.numero = s(plan.numero);
     sale.parqueFuneral = s(plan.parqueFuneral);
     sale.parkId = optionalInt(plan.parkId);
     sale.sectionId = optionalInt(plan.sectionId);
-    sale.quadrantId = optionalInt(plan.quadrantId);
-    sale.spaceId = optionalInt(plan.spaceId);
+    if (sale.preasignacion) {
+      sale.cuadrante = s(plan.cuadrante);
+      sale.numero = s(plan.numero);
+      sale.quadrantId = optionalInt(plan.quadrantId);
+      sale.spaceId = optionalInt(plan.spaceId);
+    } else {
+      sale.cuadrante = '';
+      sale.numero = '';
+      sale.quadrantId = null;
+      sale.spaceId = null;
+    }
   } else {
     sale.seccion = '';
     sale.cuadrante = '';

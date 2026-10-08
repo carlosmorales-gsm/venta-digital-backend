@@ -5,12 +5,13 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { SalesRepository } from './repositories/sales.repository';
 import { SaleStatus } from './enums/sale-status.enum';
 import { DocumentKind } from './enums/document-kind.enum';
 import { UsersRepository } from '../users/repositories/users.repository';
-import { AuditService } from '../audit/audit.service';
+import { AuditService, diffChanges } from '../audit/audit.service';
 import { AuditAction } from '../audit/enums/audit-action.enum';
 import { AuditEntityType } from '../audit/enums/audit-entity-type.enum';
 import { Sale } from './entities/sale.entity';
@@ -31,6 +32,7 @@ import {
   isUasConvenioPago,
   needsCardDocumentos,
   realContrato,
+  parseReconocimientoVentas,
   recognizedFromVentas,
   saleToAuditSnapshot,
   saleToPayload,
@@ -47,10 +49,29 @@ import { OdooGsmClient, type OdooVdReceptionLink } from '../odoo/odoo-gsm.client
 import { PlanKind } from './enums/plan-kind.enum';
 import { CONTRATO_STAMPS, stampTextOnPdf } from './utils/stamp-caratula-contrato';
 import { formatDigitalFolio } from './utils/digital-folio';
+import {
+  correctionCompanionKey,
+  correctionFieldByKey,
+  correctionFileTargets,
+  displayCorrectionValue,
+  expandCorrectionDocumentKeys,
+  parseCorrectionRequest,
+  readPath,
+  writePath,
+} from './correction-fields';
+import {
+  correctionTouchesFinance,
+  formatCorrectionMoney,
+  recomputeCorrectionFinance,
+  sameMoney,
+} from './utils/financing';
 
 @Injectable()
 export class SalesService {
   private readonly logger = new Logger(SalesService.name);
+  private readonly odooPushInflight = new Set<number>();
+  /** Vendedor y jefe ya enviados en esta ejecución del API. */
+  private readonly odooPeopleSent = new Map<number, string>();
 
   constructor(
     private readonly salesRepository: SalesRepository,
@@ -133,6 +154,50 @@ export class SalesService {
   }
 
   /**
+   * Arma el JSON del expediente. Odoo, al actualizar, escribe solo lo distinto.
+   */
+  private async buildVdReceptionPayload(
+    saleId: number,
+  ): Promise<Record<string, unknown> | null> {
+    const sale = await this.salesRepository.findById(saleId);
+    if (
+      !sale ||
+      sale.status === SaleStatus.DRAFT ||
+      sale.status === SaleStatus.REJECTED
+    ) {
+      return null;
+    }
+    await this.ensureCaratulaFromDrive(sale);
+    await this.hydrateAllDocuments(sale);
+    const publicSale = saleToPublic(sale);
+    const payloadBody =
+      publicSale.payload && typeof publicSale.payload === 'object'
+        ? (publicSale.payload as Record<string, unknown>)
+        : {};
+    const pago =
+      payloadBody.pago && typeof payloadBody.pago === 'object'
+        ? (payloadBody.pago as Record<string, unknown>)
+        : {};
+    const vdSellerName = (sale.sellerName || '').trim();
+    const vdManagerName = (sale.nombreJefeVentas || '').trim();
+    return {
+      ...publicSale,
+      sellerId: 2,
+      sellerName: '',
+      vdSellerName,
+      vdManagerName,
+      payload: {
+        ...payloadBody,
+        pago: {
+          ...pago,
+          nombreAsesor: '',
+          nombreJefeVentas: vdManagerName,
+        },
+      },
+    };
+  }
+
+  /**
    * Envía o actualiza el expediente virtual en Odoo (Mesa de Control).
    * No revierte la venta si Odoo falla; devuelve el resultado para avisar al front.
    */
@@ -158,12 +223,14 @@ export class SalesService {
     }
 
     try {
-      await this.ensureCaratulaFromDrive(sale);
-      await this.hydrateAllDocuments(sale);
-      const payload = saleToPublic(sale);
-      await this.odooGsm.syncVdReception(payload as unknown as Record<string, unknown>);
+      const payload = await this.buildVdReceptionPayload(sale.id);
+      if (!payload) {
+        return { synced: false, error: 'La venta aún no está lista para Odoo' };
+      }
+      await this.odooGsm.syncVdReception(payload);
       sale.odooReceptionSynced = true;
       await this.salesRepository.saveWithoutDocuments(sale);
+      this.odooPeopleSent.set(sale.id, this.receptionPeopleKey(sale));
       this.logger.log(`Expediente Odoo sincronizado para venta #${saleId}`);
       return { synced: true };
     } catch (e) {
@@ -225,6 +292,109 @@ export class SalesService {
     }
   }
 
+  private receptionPeopleKey(sale: Pick<Sale, 'sellerName' | 'nombreJefeVentas'>): string {
+    return `${(sale.sellerName || '').trim()}\n${(sale.nombreJefeVentas || '').trim()}`;
+  }
+
+  /** El expediente ya sincronizado no trae estos textos hasta que se reenvían. */
+  private receptionPeoplePending(sale: Sale): boolean {
+    const key = this.receptionPeopleKey(sale);
+    if (key === '\n') return false;
+    return this.odooPeopleSent.get(sale.id) !== key;
+  }
+
+  private saleReadyForOdooReception(sale: Sale): boolean {
+    return (
+      sale.status !== SaleStatus.DRAFT && sale.status !== SaleStatus.REJECTED
+    );
+  }
+
+  /**
+   * Al abrir el listado (login): crea el expediente si no está en Odoo
+   * y lo actualiza si la venta local cambió después del último envío.
+   */
+  private async pushUnsyncedReceptionsToOdoo(sales: Sale[]) {
+    const eligible = sales.filter((sale) => this.saleReadyForOdooReception(sale));
+    if (!eligible.length) return;
+
+    const links = await this.odooGsm.getVdReceptionLinks(
+      eligible.map((sale) => sale.id),
+    );
+    const byId = new Map(links.map((link) => [link.vdSaleId, link]));
+    const pending = eligible.filter((sale) => {
+      const link = byId.get(sale.id);
+      if (!link) return true;
+      if (!sale.odooReceptionSynced) return true;
+      const odooStatus = String(link.vdSaleStatus || '')
+        .trim()
+        .toUpperCase();
+      if (odooStatus && odooStatus !== String(sale.status).toUpperCase()) {
+        return true;
+      }
+      const odooMs = link.writeDate ? new Date(link.writeDate).getTime() : 0;
+      if (Number.isFinite(odooMs) && odooMs > 0) {
+        if (sale.updatedAt.getTime() > odooMs + 2500) return true;
+      }
+      return this.receptionPeoplePending(sale);
+    });
+    if (!pending.length) return;
+    this.logger.log(`Expedientes Odoo a crear o actualizar: ${pending.length}`);
+    const payloads: Array<Record<string, unknown>> = [];
+    const queued: Sale[] = [];
+    for (const sale of pending) {
+      if (this.odooPushInflight.has(sale.id)) continue;
+      this.odooPushInflight.add(sale.id);
+      try {
+        const payload = await this.buildVdReceptionPayload(sale.id);
+        if (!payload) {
+          this.odooPushInflight.delete(sale.id);
+          continue;
+        }
+        payloads.push(payload);
+        queued.push(sale);
+      } catch (e) {
+        this.logger.error(
+          `Venta #${sale.id}: no se pudo armar el expediente — ${(e as Error).message}`,
+        );
+        this.odooPushInflight.delete(sale.id);
+      }
+    }
+    if (!payloads.length) {
+      for (const sale of queued) this.odooPushInflight.delete(sale.id);
+      return;
+    }
+    try {
+      const items = await this.odooGsm.syncVdReceptionBatch(payloads);
+      const byId = new Map(queued.map((sale) => [sale.id, sale]));
+      let updated = 0;
+      let unchanged = 0;
+      for (const item of items) {
+        const sale = byId.get(Number(item.id));
+        if (!sale) continue;
+        if (item.ok === false || !(Number(item.receptionId) > 0)) {
+          this.logger.error(
+            `Venta #${sale.id}: no se pudo sincronizar expediente Odoo — ${item.error || 'sin expediente'}`,
+          );
+          continue;
+        }
+        sale.odooReceptionSynced = true;
+        await this.salesRepository.saveWithoutDocuments(sale);
+        this.odooPeopleSent.set(sale.id, this.receptionPeopleKey(sale));
+        if (item.updated || item.created) updated += 1;
+        else unchanged += 1;
+      }
+      this.logger.log(
+        `Lote de expedientes Odoo: ${items.length} (escritos ${updated}, sin cambios ${unchanged})`,
+      );
+    } catch (e) {
+      this.logger.error(
+        `No se pudo enviar el lote de expedientes a Odoo — ${(e as Error).message}`,
+      );
+    } finally {
+      for (const sale of queued) this.odooPushInflight.delete(sale.id);
+    }
+  }
+
   /**
    * Al abrir la sesión del vendedor: si Mesa ya asoció cliente/cotización
    * y Nest no se enteró (botón oculto en Odoo), copia esos IDs.
@@ -250,6 +420,11 @@ export class SalesService {
       const beforeOrder = sale.odooSaleOrderId;
       this.applyOdooReceptionLink(sale, link);
       const statusChanged = this.applySignedStatus(sale);
+      const contrato = sale.contrato?.trim() || '';
+      const gainedQuote =
+        !(Number(beforeOrder) > 0) &&
+        Number(sale.odooSaleOrderId) > 0 &&
+        Boolean(contrato);
       if (
         sale.odooPartnerId !== beforePartner ||
         sale.odooSaleOrderId !== beforeOrder ||
@@ -259,6 +434,9 @@ export class SalesService {
         this.logger.log(
           `Venta #${sale.id}: sincronizados IDs Odoo (partner=${sale.odooPartnerId ?? 0}, quote=${sale.odooSaleOrderId ?? 0}, status=${sale.status})`,
         );
+      }
+      if (gainedQuote) {
+        await this.refreshContratoOnDriveDocuments(sale, contrato);
       }
     }
   }
@@ -293,7 +471,14 @@ export class SalesService {
   }
 
   private async purgeExpired() {
-    await this.salesRepository.deleteExpiredDrafts(new Date());
+    const { draftTtlHours } = await this.settingsService.getDraftPolicy();
+    try {
+      await this.salesRepository.deleteExpiredDrafts(new Date(), draftTtlHours);
+    } catch (e) {
+      this.logger.warn(
+        `No se pudieron borrar borradores vencidos: ${(e as Error).message}`,
+      );
+    }
   }
 
   private validateCapture(payload: UpsertSaleDto['payload'], strictDocs: boolean) {
@@ -334,6 +519,28 @@ export class SalesService {
     const serviceTypeId = Number(payload.meta?.serviceTypeId);
     if (!Number.isFinite(serviceTypeId) || serviceTypeId <= 0) {
       throw new BadRequestException('El tipo de servicio es obligatorio');
+    }
+
+    const plan = payload.ubicacionPlan;
+    if (String(plan?.planKind || '').toUpperCase() === PlanKind.PARQUE) {
+      const parkId = Number(plan?.parkId);
+      const sectionId = Number(plan?.sectionId);
+      if (!Number.isFinite(parkId) || parkId <= 0 || !(plan?.parqueFuneral || '').trim()) {
+        throw new BadRequestException('El parque es obligatorio');
+      }
+      if (!Number.isFinite(sectionId) || sectionId <= 0 || !(plan?.seccion || '').trim()) {
+        throw new BadRequestException('La sección es obligatoria');
+      }
+      if (plan?.preasignacion) {
+        const quadrantId = Number(plan.quadrantId);
+        const spaceId = Number(plan.spaceId);
+        if (!Number.isFinite(quadrantId) || quadrantId <= 0) {
+          throw new BadRequestException('El cuadrante es obligatorio en preasignación');
+        }
+        if (!Number.isFinite(spaceId) || spaceId <= 0) {
+          throw new BadRequestException('La ubicación es obligatoria en preasignación');
+        }
+      }
     }
 
     const wantsInvoice =
@@ -427,9 +634,24 @@ export class SalesService {
           payload.documentos?.ineReverso) ||
         payload.documentos?.inePdf ||
         payload.documentos?.ine;
-      if (!hasIne || !payload.documentos?.comprobanteDomicilio) {
+      const frecuencia = String(payload.pago?.frecuencia || '')
+        .trim()
+        .toUpperCase();
+      const esContado =
+        frecuencia === 'CONTADO' ||
+        frecuencia.includes('CONTADO') ||
+        frecuencia.includes('UNA SOLA');
+      const planKind = String(plan?.planKind || '').toUpperCase();
+      const omiteDomicilio =
+        esContado && planKind === PlanKind.PLAN_FUTURO;
+      if (!hasIne) {
         throw new BadRequestException(
-          'Debes adjuntar INE (frente y reverso) y comprobante de domicilio',
+          'Debes adjuntar INE (frente y reverso)',
+        );
+      }
+      if (!omiteDomicilio && !payload.documentos?.comprobanteDomicilio) {
+        throw new BadRequestException(
+          'Debes adjuntar el comprobante de domicilio',
         );
       }
       if (needsCardDocumentos(cobranza, pago)) {
@@ -467,17 +689,24 @@ export class SalesService {
     const items = await this.salesRepository.findSummariesBySellerId(sellerId);
     await this.pullOdooLinksIfMissing(items);
     await this.refreshSignedStatuses(items);
+    void this.pushUnsyncedReceptionsToOdoo(items).catch((e) => {
+      this.logger.error(
+        `No se pudieron reenviar expedientes a Odoo: ${(e as Error).message}`,
+      );
+    });
     const now = Date.now();
+    const { draftLimit, draftTtlHours } =
+      await this.settingsService.getDraftPolicy();
+    const ttlMs = draftTtlHours * 60 * 60 * 1000;
     const visible = items.filter((s) => {
-      if (s.status === SaleStatus.DRAFT) {
-        return !s.draftExpiresAt || s.draftExpiresAt.getTime() > now;
-      }
+      if (s.status !== SaleStatus.DRAFT) return true;
+      const created = s.createdAt?.getTime?.() ?? 0;
+      if (created && created + ttlMs <= now) return false;
+      if (s.draftExpiresAt && s.draftExpiresAt.getTime() <= now) return false;
       return true;
     });
     const drafts = visible.filter((s) => s.status === SaleStatus.DRAFT);
     const pipeline = visible.filter((s) => s.status !== SaleStatus.DRAFT);
-    const { draftLimit, draftTtlHours } =
-      await this.settingsService.getDraftPolicy();
 
     return {
       scope: 'own' as const,
@@ -500,6 +729,11 @@ export class SalesService {
     const items = await this.salesRepository.findForMonitor();
     await this.pullOdooLinksIfMissing(items);
     await this.refreshSignedStatuses(items);
+    void this.pushUnsyncedReceptionsToOdoo(items).catch((e) => {
+      this.logger.error(
+        `No se pudieron reenviar expedientes a Odoo: ${(e as Error).message}`,
+      );
+    });
     return {
       scope: 'all' as const,
       items: items.map(saleToListItem),
@@ -523,6 +757,7 @@ export class SalesService {
         id: s.id,
         sellerId: s.sellerId,
         sellerName: s.sellerName,
+        nombreJefeVentas: s.nombreJefeVentas ?? '',
         status: s.status,
         titularName: s.titularName,
         odooPartnerId: s.odooPartnerId ?? null,
@@ -718,6 +953,7 @@ export class SalesService {
       entityId: sale.id,
       summary: `Odoo canceló venta #${sale.id} (${titular})`,
       details: {
+        kind: 'changes',
         before,
         after: saleToAuditSnapshot(sale),
         reason: trimmedReason,
@@ -729,6 +965,454 @@ export class SalesService {
       status: sale.status,
       alreadyRejected: false,
     };
+  }
+
+  /** Mesa de Control pide de nuevo los archivos que el vendedor debe subir. */
+  async requestCorrectionFromOdoo(id: number, fields: string[]) {
+    const sale = await this.salesRepository.findById(id);
+    if (!sale) throw new NotFoundException('Venta no encontrada');
+
+    const keys = expandCorrectionDocumentKeys(
+      [...new Set(fields.map((item) => item.trim()).filter(Boolean))],
+    );
+    if (!keys.length || keys.some((key) => !correctionFieldByKey(key))) {
+      throw new BadRequestException('Selecciona datos de la venta para corregir');
+    }
+
+    const allowed = new Set<SaleStatus>([
+      SaleStatus.PENDING_PAYMENT,
+      SaleStatus.PENDING_SIGNATURE,
+      SaleStatus.PENDING_VALIDATION,
+      SaleStatus.COMPLETED,
+      SaleStatus.PENDING_CORRECTION,
+      SaleStatus.PENDING_CORRECTION_REVIEW,
+    ]);
+    if (!allowed.has(sale.status)) {
+      throw new BadRequestException(
+        'Esta venta no se puede mandar a corrección',
+      );
+    }
+
+    const previous = parseCorrectionRequest(sale.correctionRequest);
+    const keepReturn =
+      sale.status === SaleStatus.PENDING_CORRECTION ||
+      sale.status === SaleStatus.PENDING_CORRECTION_REVIEW;
+    const returnStatus = keepReturn
+      ? previous.returnStatus || SaleStatus.PENDING_VALIDATION
+      : sale.status;
+
+    sale.status = SaleStatus.PENDING_CORRECTION;
+    sale.correctionRequest = JSON.stringify({
+      fields: keys,
+      returnStatus,
+      previous: this.snapshotCorrectionFiles(sale, keys, previous.previous),
+      review: [],
+    });
+    sale.odooReceptionSynced = false;
+    await this.salesRepository.saveWithoutDocuments(sale);
+    const titular =
+      sale.titularName || (sale.holder ? fullName(sale.holder) : '') || 'sin titular';
+    const campos = keys
+      .map((key) => correctionFieldByKey(key)?.label || key)
+      .join(', ');
+    await this.auditService.record({
+      actor: {
+        userId: null,
+        fullName: 'Odoo (Mesa de Control)',
+        type: 'INTEGRATION',
+      },
+      action: AuditAction.UPDATE,
+      entityType: AuditEntityType.SALE,
+      entityId: sale.id,
+      summary: `Mesa de Control mandó a corregir venta #${sale.id} (${titular})`,
+      details: { kind: 'note', campos },
+    });
+    void this.syncReceptionToOdoo(sale.id).catch(() => undefined);
+
+    return {
+      id: sale.id,
+      status: sale.status,
+      fields: keys,
+    };
+  }
+
+  /** El vendedor guarda los datos marcados y la venta vuelve a su estatus anterior. */
+  async submitSellerCorrection(
+    id: number,
+    user: AuthUserPayload,
+    values: Record<string, unknown>,
+  ) {
+    const sale = await this.salesRepository.findByIdWithFiles(id);
+    if (!sale) throw new NotFoundException('Venta no encontrada');
+    this.assertSellerOwns(sale, user.userId);
+    if (sale.status !== SaleStatus.PENDING_CORRECTION) {
+      throw new BadRequestException('Esta venta no está por corregir');
+    }
+
+    const request = parseCorrectionRequest(sale.correctionRequest);
+    const requested = expandCorrectionDocumentKeys(request.fields);
+    const fileTargets = correctionFileTargets(requested);
+    if (!requested.length) {
+      throw new BadRequestException('No hay archivos marcados para corregir');
+    }
+
+    for (const target of fileTargets) {
+      const file = values?.[target.saveKey] as { dataBase64?: string } | undefined;
+      if (!file?.dataBase64) {
+        throw new BadRequestException(`Adjunta el archivo de ${target.label}`);
+      }
+    }
+
+    const beforeCorrection = saleToAuditSnapshot(sale);
+    const payload = saleToPayload(sale) as unknown as Record<string, unknown>;
+    const savedFileKeys = new Set(fileTargets.map((target) => target.saveKey));
+    for (const target of fileTargets) {
+      const file = values[target.saveKey] as {
+        name?: string;
+        mime?: string;
+        dataBase64?: string;
+      };
+      writePath(payload, target.saveKey, {
+        name: file.name || target.label,
+        mime: file.mime || 'application/octet-stream',
+        dataBase64: file.dataBase64,
+      });
+    }
+    for (const key of requested) {
+      if (savedFileKeys.has(key) || correctionFileTargets([key]).some((t) => t.saveKey !== key)) {
+        continue;
+      }
+      const def = correctionFieldByKey(key);
+      if (!def || def.kind === 'document' || !(key in (values || {}))) continue;
+      const incoming = values[key];
+      writePath(payload, key, incoming == null ? '' : String(incoming));
+      const companion = correctionCompanionKey(key);
+      if (companion && values?.[companion] != null && values[companion] !== '') {
+        const id = Number(values[companion]);
+        if (Number.isFinite(id) && id > 0) writePath(payload, companion, id);
+      }
+    }
+
+    const financeNext = new Map<string, string>();
+    const financeReview: Array<{
+      key: string;
+      label: string;
+      previous: string;
+      next: string;
+    }> = [];
+    if (correctionTouchesFinance(requested)) {
+      const pago = (readPath(payload, 'pago') ?? {}) as Record<string, unknown>;
+      const plan = (readPath(payload, 'ubicacionPlan') ?? {}) as Record<string, unknown>;
+      const before = {
+        saldo: displayCorrectionValue(pago.saldo),
+        cuota: displayCorrectionValue(pago.importeCadaPago),
+        dias: displayCorrectionValue(pago.diasEspecificosPago),
+        plazo: displayCorrectionValue(pago.plazo),
+        inicial: displayCorrectionValue(pago.pagoInicial),
+      };
+      const frequencyChanged =
+        requested.includes('pago.frecuencia') &&
+        String(sale.frecuencia || '')
+          .trim()
+          .toUpperCase() !==
+          String(pago.frecuencia || '')
+            .trim()
+            .toUpperCase();
+      const finance = recomputeCorrectionFinance({
+        precioPlan: plan.precioPlan || pago.precioPlan,
+        descuentoPct: pago.promocionDescuento,
+        anticipo: pago.anticipo,
+        frecuencia: pago.frecuencia,
+        plazo: pago.plazo,
+        withoutInterest: Boolean(plan.withoutInterest),
+        recognizedBalance: recognizedFromVentas(sale.reconocimientoVentas),
+        previousPagoInicial: before.inicial,
+        previousDias: before.dias,
+        frequencyChanged,
+      });
+      const derived: Array<{
+        key: string;
+        label: string;
+        previous: string;
+        next: string;
+        money: boolean;
+      }> = [
+        {
+          key: 'pago.saldo',
+          label: 'Pago · Saldo',
+          previous: before.saldo,
+          next: finance.saldo,
+          money: true,
+        },
+        {
+          key: 'pago.importeCadaPago',
+          label: 'Pago · Importe de cada pago',
+          previous: before.cuota,
+          next: finance.importeCadaPago,
+          money: true,
+        },
+      ];
+      if (frequencyChanged) {
+        derived.push({
+          key: 'pago.diasEspecificosPago',
+          label: 'Pago · Días específicos de pago',
+          previous: before.dias,
+          next: finance.diasEspecificosPago,
+          money: false,
+        });
+        derived.push({
+          key: 'pago.plazo',
+          label: 'Pago · Plazo',
+          previous: before.plazo,
+          next: finance.plazo,
+          money: false,
+        });
+      }
+      if (finance.pagoInicial != null) {
+        derived.push({
+          key: 'pago.pagoInicial',
+          label: 'Pago · Pago inicial',
+          previous: before.inicial,
+          next: finance.pagoInicial,
+          money: true,
+        });
+      }
+      for (const item of derived) {
+        writePath(payload, item.key, item.next);
+        financeNext.set(item.key, item.next);
+        if (requested.includes(item.key)) continue;
+        const changed = item.money
+          ? !sameMoney(item.previous, item.next)
+          : (item.previous.trim() || '—') !== (item.next.trim() || '—');
+        if (!changed) continue;
+        financeReview.push({
+          key: item.key,
+          label: item.label,
+          previous: item.money
+            ? formatCorrectionMoney(item.previous)
+            : item.previous.trim() || '—',
+          next: item.money
+            ? formatCorrectionMoney(item.next)
+            : item.next.trim() || '—',
+        });
+      }
+    }
+
+    applyPayloadToSale(sale, payload as never);
+    const dropCombined = new Set<DocumentKind>();
+    if (savedFileKeys.has('documentos.ineFrente') || savedFileKeys.has('documentos.ineReverso')) {
+      dropCombined.add(DocumentKind.INE);
+    }
+    if (
+      savedFileKeys.has('documentos.tarjetaFrente') ||
+      savedFileKeys.has('documentos.tarjetaReverso')
+    ) {
+      dropCombined.add(DocumentKind.TARJETA);
+    }
+    if (dropCombined.size) {
+      sale.documents = (sale.documents ?? []).filter(
+        (doc) => !dropCombined.has(doc.kind),
+      );
+    }
+    const review = [
+      ...request.fields
+        .map((key) => correctionFieldByKey(key))
+        .filter((def) => def?.kind === 'field')
+        .map((def) => {
+          const key = def!.key;
+          const overridden = financeNext.has(key);
+          const rawNext = overridden
+            ? financeNext.get(key) || ''
+            : displayCorrectionValue(values[key]);
+          const rawPrev = (request.previous[key] || '').trim();
+          const asMoney = overridden && key === 'pago.pagoInicial';
+          return {
+            key,
+            label: `${def!.sectionLabel} · ${def!.label}`,
+            previous: asMoney
+              ? formatCorrectionMoney(rawPrev)
+              : rawPrev || '—',
+            next: asMoney
+              ? formatCorrectionMoney(rawNext)
+              : rawNext || '—',
+          };
+        }),
+      ...fileTargets.map((target) => {
+        const file = values[target.saveKey] as { name?: string };
+        return {
+          key: target.saveKey,
+          label: target.label,
+          previous: (request.previous[target.saveKey] || '').trim() || '—',
+          next: file?.name?.trim() || target.label,
+        };
+      }),
+      ...financeReview,
+    ];
+    sale.status = SaleStatus.PENDING_CORRECTION_REVIEW;
+    sale.correctionRequest = JSON.stringify({
+      fields: request.fields,
+      returnStatus: request.returnStatus,
+      previous: request.previous,
+      review,
+    });
+    sale.odooReceptionSynced = false;
+    const saved = await this.salesRepository.save(sale);
+    const correctionChanges = diffChanges(
+      beforeCorrection,
+      saleToAuditSnapshot(saved),
+    );
+    if (Object.keys(correctionChanges).length) {
+      const seller = await this.usersRepository.findById(user.userId);
+      const titular =
+        saved.titularName ||
+        (saved.holder ? fullName(saved.holder) : '') ||
+        'sin titular';
+      await this.auditService.record({
+        actor: {
+          userId: user.userId,
+          fullName: seller?.fullName,
+          type: user.type,
+        },
+        action: AuditAction.UPDATE,
+        entityType: AuditEntityType.SALE,
+        entityId: saved.id,
+        summary: `Corrigió datos de venta #${saved.id} (${titular})`,
+        details: { kind: 'changes', changes: correctionChanges },
+      });
+    }
+    void this.syncReceptionToOdoo(saved.id).catch(() => undefined);
+    return saleToPublic(saved);
+  }
+
+  /** Mesa abre el expediente: la corrección reenviada espera aceptación. */
+  async getCorrectionReview(id: number) {
+    const sale = await this.salesRepository.findById(id);
+    if (!sale) throw new NotFoundException('Venta no encontrada');
+    if (sale.status !== SaleStatus.PENDING_CORRECTION_REVIEW) {
+      return { pending: false as const };
+    }
+    const request = parseCorrectionRequest(sale.correctionRequest);
+    return {
+      pending: true as const,
+      id: sale.id,
+      status: sale.status,
+      titularName: sale.titularName || '',
+      items: request.review,
+    };
+  }
+
+  /** Acepta la corrección: el expediente recibe los archivos y sigue el flujo. */
+  async acceptCorrectionReview(id: number) {
+    const sale = await this.salesRepository.findById(id);
+    if (!sale) throw new NotFoundException('Venta no encontrada');
+    if (sale.status !== SaleStatus.PENDING_CORRECTION_REVIEW) {
+      throw new BadRequestException('Esta corrección ya no está por validar');
+    }
+    const request = parseCorrectionRequest(sale.correctionRequest);
+    const next = Object.values(SaleStatus).includes(request.returnStatus as SaleStatus)
+      ? (request.returnStatus as SaleStatus)
+      : SaleStatus.PENDING_VALIDATION;
+    const returnStatus =
+      next === SaleStatus.PENDING_CORRECTION ||
+      next === SaleStatus.PENDING_CORRECTION_REVIEW
+        ? SaleStatus.PENDING_VALIDATION
+        : next;
+    const backupStatus = sale.status;
+    const backupRequest = sale.correctionRequest;
+    sale.status = returnStatus;
+    sale.correctionRequest = '';
+    sale.odooReceptionSynced = false;
+    await this.salesRepository.saveWithoutDocuments(sale);
+    const synced = await this.syncReceptionToOdoo(sale.id);
+    if (!synced.synced) {
+      sale.status = backupStatus;
+      sale.correctionRequest = backupRequest;
+      sale.odooReceptionSynced = false;
+      await this.salesRepository.saveWithoutDocuments(sale);
+      throw new ServiceUnavailableException(
+        synced.error || 'No se pudo actualizar el expediente en Odoo',
+      );
+    }
+    return { id: sale.id, status: sale.status };
+  }
+
+  /** Rechaza la corrección: el vendedor vuelve a ver la venta por corregir. */
+  async rejectCorrectionReview(id: number) {
+    const sale = await this.salesRepository.findById(id);
+    if (!sale) throw new NotFoundException('Venta no encontrada');
+    if (sale.status !== SaleStatus.PENDING_CORRECTION_REVIEW) {
+      throw new BadRequestException('Esta corrección ya no está por validar');
+    }
+    const request = parseCorrectionRequest(sale.correctionRequest);
+    const backupStatus = sale.status;
+    const backupRequest = sale.correctionRequest;
+    sale.status = SaleStatus.PENDING_CORRECTION;
+    sale.correctionRequest = JSON.stringify({
+      fields: request.fields,
+      returnStatus: request.returnStatus,
+      previous: request.previous,
+      review: [],
+    });
+    sale.odooReceptionSynced = false;
+    await this.salesRepository.saveWithoutDocuments(sale);
+    const synced = await this.syncReceptionToOdoo(sale.id);
+    if (!synced.synced) {
+      sale.status = backupStatus;
+      sale.correctionRequest = backupRequest;
+      sale.odooReceptionSynced = false;
+      await this.salesRepository.saveWithoutDocuments(sale);
+      throw new ServiceUnavailableException(
+        synced.error || 'No se pudo actualizar el expediente en Odoo',
+      );
+    }
+    return { id: sale.id, status: sale.status, fields: request.fields };
+  }
+
+  private snapshotCorrectionFiles(
+    sale: Sale,
+    keys: string[],
+    existing: Record<string, string>,
+  ): Record<string, string> {
+    const previous = { ...existing };
+    const payload = saleToPayload(sale);
+    for (const key of keys) {
+      const def = correctionFieldByKey(key);
+      if (!def || def.kind !== 'field') continue;
+      if ((previous[key] || '').trim()) continue;
+      previous[key] = displayCorrectionValue(readPath(payload, key)) || '—';
+    }
+    for (const target of correctionFileTargets(keys)) {
+      if ((previous[target.saveKey] || '').trim()) continue;
+      previous[target.saveKey] = this.correctionFileName(sale, target.saveKey);
+    }
+    return previous;
+  }
+
+  private correctionFileName(sale: Sale, saveKey: string): string {
+    const docs = sale.documents ?? [];
+    const nameOf = (kind: DocumentKind) =>
+      docs.find((doc) => doc.kind === kind)?.name?.trim() || '';
+    if (saveKey === 'documentos.ineFrente') {
+      return nameOf(DocumentKind.INE_FRENTE) || nameOf(DocumentKind.INE) || '—';
+    }
+    if (saveKey === 'documentos.ineReverso') {
+      return nameOf(DocumentKind.INE_REVERSO) || '—';
+    }
+    if (saveKey === 'documentos.tarjetaFrente') {
+      return nameOf(DocumentKind.TARJETA_FRENTE) || nameOf(DocumentKind.TARJETA) || '—';
+    }
+    if (saveKey === 'documentos.tarjetaReverso') {
+      return nameOf(DocumentKind.TARJETA_REVERSO) || '—';
+    }
+    const kindByKey: Record<string, DocumentKind> = {
+      'documentos.comprobanteDomicilio': DocumentKind.COMPROBANTE,
+      'documentos.constanciaSituacionFiscal': DocumentKind.CONSTANCIA_FISCAL,
+      'documentos.reciboNomina': DocumentKind.RECIBO_NOMINA,
+      'documentos.domiciliacionBanorte': DocumentKind.BANORTE_DOM,
+      'documentos.comprobanteTransferencia': DocumentKind.COMP_TRANSFERENCIA,
+    };
+    const kind = kindByKey[saveKey];
+    return (kind && nameOf(kind)) || '—';
   }
 
   /** Desvincula la cotización Odoo sin rechazar la venta digital. */
@@ -773,8 +1457,9 @@ export class SalesService {
       action: AuditAction.UPDATE,
       entityType: AuditEntityType.SALE,
       entityId: sale.id,
-      summary: `Odoo desvinculó cotización de venta #${sale.id} (${titular})`,
+      summary: `Odoo desvinculó la cotización de venta #${sale.id} (${titular})`,
       details: {
+        kind: 'changes',
         before,
         after: saleToAuditSnapshot(sale),
         reason: trimmedReason,
@@ -840,24 +1525,31 @@ export class SalesService {
    */
   private async refreshContratoOnDriveDocuments(sale: Sale, contrato: string) {
     if (!this.googleDrive.isEnabled()) return;
+    const folio = contrato.trim();
+    if (!folio) return;
+
+    const loaded = await this.salesRepository.findById(sale.id);
+    const current = loaded ?? sale;
 
     const driveHint: Partial<Record<DocumentKind, string>> = {
-      [DocumentKind.CARATULA]: `${sale.id}-Caratula`,
+      [DocumentKind.CARATULA]: `${current.id}-Caratula`,
       [DocumentKind.CARTA_EXCLUSIONES]: 'CartaAceptacionExclusiones',
       [DocumentKind.REGLAMENTO_PARQUE]: 'ReglamentoParque.pdf',
       [DocumentKind.REGLAMENTO_FOLLETO]: 'ReglamentoParqueFolleto',
       [DocumentKind.CARTA_AUTORIZACION]: 'CartaAutorizacion',
       [DocumentKind.CARTA_NOMINA]: 'CartaConsentimientoNomina',
+      [DocumentKind.CARTA_FACTURA]: 'CartaRequerimientoFactura',
+      [DocumentKind.CARTA_NO_FACTURA]: 'ConsentimientoNoFactura',
     };
 
     for (const [kind, stamp] of Object.entries(CONTRATO_STAMPS)) {
       const docKind = kind as DocumentKind;
-      const existing = (sale.documents ?? []).find((d) => d.kind === docKind);
+      const existing = (current.documents ?? []).find((d) => d.kind === docKind);
       let fileId = existing?.driveFileId ?? null;
-      if (!fileId && sale.driveFolderId) {
+      if (!fileId && current.driveFolderId) {
         const hint = driveHint[docKind];
         const found = hint
-          ? await this.googleDrive.findSalePdfInFolder(sale.driveFolderId, hint)
+          ? await this.googleDrive.findSalePdfInFolder(current.driveFolderId, hint)
           : null;
         fileId = found?.id ?? null;
         if (found && !existing) {
@@ -886,7 +1578,7 @@ export class SalesService {
         }
         const stamped = stampTextOnPdf(
           Buffer.from(downloaded.dataBase64, 'base64'),
-          contrato,
+          folio,
           stamp,
         );
         await this.googleDrive.updateFileBuffer(
@@ -909,8 +1601,12 @@ export class SalesService {
   async createDraft(user: AuthUserPayload, dto: UpsertSaleDto) {
     await this.purgeExpired();
     const now = new Date();
-    const { draftLimit } = await this.settingsService.getDraftPolicy();
-    const count = await this.salesRepository.countActiveDrafts(user.userId, now);
+    const { draftLimit, draftTtlHours } = await this.settingsService.getDraftPolicy();
+    const count = await this.salesRepository.countActiveDrafts(
+      user.userId,
+      now,
+      draftTtlHours,
+    );
     if (count >= draftLimit) {
       throw new BadRequestException(
         `Solo puedes tener ${draftLimit} borradores. Elimina o envía uno antes de crear otro.`,
@@ -951,8 +1647,8 @@ export class SalesService {
       action: AuditAction.CREATE,
       entityType: AuditEntityType.SALE,
       entityId: saved.id,
-      summary: `${seller?.fullName ?? 'Vendedor'} guardó borrador de venta #${saved.id} (${titular})`,
-      details: { after: saleToAuditSnapshot(saved) },
+      summary: `Guardó borrador de venta #${saved.id} (${titular})`,
+      details: { kind: 'sale', after: saleToAuditSnapshot(saved) },
     });
 
     return saleToPublic(saved);
@@ -978,14 +1674,37 @@ export class SalesService {
       }
     }
 
+    const beforeDraft = saleToAuditSnapshot(sale);
     applyPayloadToSale(sale, dto.payload);
     const seller = await this.usersRepository.findById(user.userId);
     this.applySellerCatalogNames(sale, seller);
     await this.assertDiscountAndSaldo(sale, user.userId);
     if (dto.titularName?.trim()) sale.titularName = dto.titularName.trim();
-    sale.draftExpiresAt = await this.draftExpiry();
+    if (!sale.draftExpiresAt && sale.createdAt) {
+      sale.draftExpiresAt = await this.draftExpiry(sale.createdAt);
+    }
     sale.folioSolicitud = formatDigitalFolio(sale.id);
     const saved = await this.salesRepository.save(sale);
+    const afterDraft = saleToAuditSnapshot(saved);
+    const draftChanges = diffChanges(beforeDraft, afterDraft);
+    if (Object.keys(draftChanges).length) {
+      const titular =
+        saved.titularName ||
+        (saved.holder ? fullName(saved.holder) : '') ||
+        'sin titular';
+      await this.auditService.record({
+        actor: {
+          userId: user.userId,
+          fullName: seller?.fullName,
+          type: user.type,
+        },
+        action: AuditAction.UPDATE,
+        entityType: AuditEntityType.SALE,
+        entityId: saved.id,
+        summary: `Actualizó borrador de venta #${saved.id} (${titular})`,
+        details: { kind: 'changes', changes: draftChanges },
+      });
+    }
     return saleToPublic(saved);
   }
 
@@ -1017,6 +1736,27 @@ export class SalesService {
     }
 
     applyPayloadToSale(sale, dto.payload);
+    const tipoVenta = String(dto.payload?.meta?.tipoVenta || sale.estatus || '')
+      .trim()
+      .toUpperCase();
+    const originSales = parseReconocimientoVentas(sale.reconocimientoVentas);
+    if (
+      (tipoVenta === 'RECONOCIMIENTO' ||
+        tipoVenta === 'MEJORA' ||
+        tipoVenta === 'MINORIA' ||
+        sale.estatus === 'REACTIVACION' ||
+        sale.estatus === 'MEJORA' ||
+        sale.estatus === 'MINORIA') &&
+      !originSales.length
+    ) {
+      throw new BadRequestException(
+        tipoVenta === 'MEJORA' || sale.estatus === 'MEJORA'
+          ? 'Selecciona al menos una venta a mejorar'
+          : tipoVenta === 'MINORIA' || sale.estatus === 'MINORIA'
+            ? 'Selecciona al menos una venta de minoría'
+            : 'Selecciona al menos una venta a reconocer',
+      );
+    }
     this.applySellerCatalogNames(sale, seller);
     await this.assertDiscountAndSaldo(sale, user.userId);
     sale.status = SaleStatus.PENDING_PAYMENT;
@@ -1032,7 +1772,7 @@ export class SalesService {
       await this.reservePreassignedSpace(saved);
     } catch (e) {
       saved.status = SaleStatus.DRAFT;
-      saved.draftExpiresAt = await this.draftExpiry();
+      saved.draftExpiresAt = await this.draftExpiry(saved.createdAt);
       await this.salesRepository.saveWithoutDocuments(saved);
       throw e;
     }
@@ -1063,8 +1803,8 @@ export class SalesService {
       action: id != null ? AuditAction.UPDATE : AuditAction.CREATE,
       entityType: AuditEntityType.SALE,
       entityId: saved.id,
-      summary: `${seller?.fullName ?? 'Vendedor'} finalizó captura de venta #${saved.id} (${titular})`,
-      details: { after: saleToAuditSnapshot(saved) },
+      summary: `Generó venta nueva #${saved.id} (${titular})`,
+      details: { kind: 'sale', after: saleToAuditSnapshot(saved) },
     });
 
     const odooSync = await this.syncReceptionToOdoo(saved.id);
@@ -1080,6 +1820,19 @@ export class SalesService {
     const anticipo = this.parseMoney(sale.anticipo);
     const inicial = this.parseMoney(sale.pagoInicial);
     return Number(((anticipo > 0 ? anticipo : 0) + (inicial > 0 ? inicial : 0)).toFixed(2));
+  }
+
+  private assertPaymentProof(sale: Sale, dto: SavePaymentDto, message: string) {
+    const existing = (sale.documents ?? []).find(
+      (d) => d.kind === DocumentKind.COMP_TRANSFERENCIA,
+    );
+    if (
+      !dto.comprobanteTransferencia?.dataBase64 &&
+      !existing?.dataBase64 &&
+      !existing?.driveFileId
+    ) {
+      throw new BadRequestException(message);
+    }
   }
 
   async savePayment(id: number, user: AuthUserPayload, dto: SavePaymentDto) {
@@ -1140,6 +1893,7 @@ export class SalesService {
       sale.cambio = String(
         Number(Math.max(0, received - dueNum).toFixed(2)),
       );
+      this.assertPaymentProof(sale, dto, 'Adjunta el comprobante de pago');
     } else {
       sale.montoRecibido = '';
       sale.cambio = '';
@@ -1162,14 +1916,11 @@ export class SalesService {
         sale.cuentaPago = '';
       }
       if (forma === 'TRANSFERENCIA') {
-        const existing = (sale.documents ?? []).find(
-          (d) => d.kind === DocumentKind.COMP_TRANSFERENCIA,
+        this.assertPaymentProof(
+          sale,
+          dto,
+          'Adjunta el comprobante de transferencia',
         );
-        if (!dto.comprobanteTransferencia?.dataBase64 && !existing?.dataBase64 && !existing?.driveFileId) {
-          throw new BadRequestException(
-            'Adjunta el comprobante de transferencia',
-          );
-        }
       }
     }
 
@@ -1265,8 +2016,20 @@ export class SalesService {
       action: AuditAction.UPDATE,
       entityType: AuditEntityType.SALE,
       entityId: sale.id,
-      summary: `${seller?.fullName ?? 'Vendedor'} registró pago de venta #${sale.id} (${titular})`,
-      details: { after: saleToAuditSnapshot(sale) },
+      summary: `Generó pago de venta #${sale.id} (${titular})`,
+      details: {
+        kind: 'payment',
+        formaPago: sale.formaPago,
+        montoRecibido: sale.montoRecibido,
+        cambio: sale.cambio,
+        anticipo: sale.anticipo,
+        pagoInicial: sale.pagoInicial,
+        frecuencia: sale.frecuencia,
+        banco: sale.bancoPago || sale.banco,
+        cuenta: sale.cuentaPago || sale.cuenta,
+        amount: Number(sale.amount) || 0,
+        status: sale.status,
+      },
     });
 
     const odooSync = await this.syncReceptionToOdoo(sale.id);
@@ -1293,7 +2056,11 @@ export class SalesService {
   }
 
   /** Envía solo el enlace de firma al correo del titular. No incluye el ticket. */
-  async sendClientSignLink(id: number, user: AuthUserPayload) {
+  async sendClientSignLink(
+    id: number,
+    user: AuthUserPayload,
+    frontCandidates?: Array<string | undefined>,
+  ) {
     const sale = await this.salesRepository.findById(id);
     if (!sale) throw new NotFoundException('Venta no encontrada');
     this.assertSellerOwns(sale, user.userId);
@@ -1317,7 +2084,7 @@ export class SalesService {
     await this.ticketNotifications.sendSignLink({
       customerName: titular,
       email,
-      signUrl: this.clientSignUrl(sale.id),
+      signUrl: this.clientSignUrl(sale.id, frontCandidates),
     });
 
     const seller = await this.usersRepository.findById(user.userId);
@@ -1330,8 +2097,8 @@ export class SalesService {
       action: AuditAction.UPDATE,
       entityType: AuditEntityType.SALE,
       entityId: sale.id,
-      summary: `${seller?.fullName ?? 'Vendedor'} envió el enlace de firma de venta #${sale.id} (${titular})`,
-      details: { email },
+      summary: `Envió correo de firma al titular de venta #${sale.id} (${titular})`,
+      details: { kind: 'email', correo: email },
     });
 
     return { ok: true };
@@ -1363,12 +2130,40 @@ export class SalesService {
     }
   }
 
-  private clientSignUrl(saleId: number): string {
-    const front = (
-      this.config.get<string>('FRONT_URL') || 'http://localhost:5173'
-    )
-      .trim()
-      .replace(/\/+$/, '');
+  /** Origen http(s) de una URL o de un header Origin/Referer. */
+  private frontOrigin(raw?: string): string | null {
+    const value = String(raw || '').trim();
+    if (!value) return null;
+    try {
+      const url = new URL(value);
+      if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+      if (url.username || url.password) return null;
+      return url.origin;
+    } catch {
+      return null;
+    }
+  }
+
+  private resolveFrontBase(candidates?: Array<string | undefined>): string {
+    for (const raw of candidates ?? []) {
+      const origin = this.frontOrigin(raw);
+      if (origin) return origin;
+    }
+
+    if (this.config.get<string>('NODE_ENV') !== 'production') {
+      return 'http://localhost:5173';
+    }
+
+    throw new BadRequestException(
+      'No se pudo armar el enlace de firma: falta la URL del front.',
+    );
+  }
+
+  private clientSignUrl(
+    saleId: number,
+    frontCandidates?: Array<string | undefined>,
+  ): string {
+    const front = this.resolveFrontBase(frontCandidates);
     return `${front}/firmar/${encodeURIComponent(this.clientSignToken(saleId))}`;
   }
 
@@ -1418,6 +2213,7 @@ export class SalesService {
         'Solo se puede firmar cuando el pago ya fue registrado',
       );
     }
+    const beforeStatus = sale.status;
     if (!dto.firmaCliente?.dataBase64) {
       throw new BadRequestException('La firma es obligatoria');
     }
@@ -1578,6 +2374,8 @@ export class SalesService {
       return { name: d.name, mime: d.mime, dataBase64: d.dataBase64 };
     };
     const documentosPayload: Record<string, unknown> = {
+      ineFrente: docAtt(DocumentKind.INE_FRENTE),
+      ineReverso: docAtt(DocumentKind.INE_REVERSO),
       comprobanteDomicilio: docAtt(DocumentKind.COMPROBANTE),
       constanciaSituacionFiscal: docAtt(DocumentKind.CONSTANCIA_FISCAL),
       tarjetaFrente: docAtt(DocumentKind.TARJETA_FRENTE),
@@ -1611,6 +2409,10 @@ export class SalesService {
       domiciliacionBanorte: DocumentKind.BANORTE_DOM,
       tarjetaPdf: DocumentKind.TARJETA,
       inePdf: DocumentKind.INE,
+      ineFrente: DocumentKind.INE_FRENTE,
+      ineReverso: DocumentKind.INE_REVERSO,
+      tarjetaFrente: DocumentKind.TARJETA_FRENTE,
+      tarjetaReverso: DocumentKind.TARJETA_REVERSO,
     };
 
     if (this.googleDrive.isEnabled()) {
@@ -1727,8 +2529,13 @@ export class SalesService {
       entityId: sale.id,
       summary: viaClientLink
         ? `El titular firmó venta #${sale.id} (${titular}) desde el enlace del correo`
-        : `${seller?.fullName ?? 'Vendedor'} firmó venta #${sale.id} (${titular})`,
-      details: { after: saleToAuditSnapshot(sale) },
+        : `Firmó venta #${sale.id} (${titular})`,
+      details: {
+        kind: 'sign',
+        changes: {
+          status: { from: beforeStatus, to: sale.status },
+        },
+      },
     });
 
     void this.syncReceptionToOdoo(sale.id).then((odooSync) => {
@@ -1764,8 +2571,8 @@ export class SalesService {
       action: AuditAction.DELETE,
       entityType: AuditEntityType.SALE,
       entityId: id,
-      summary: `${seller?.fullName ?? 'Vendedor'} eliminó borrador de venta #${id} (${titular})`,
-      details: { after: snapshot },
+      summary: `Eliminó borrador de venta #${id} (${titular})`,
+      details: { kind: 'delete', after: snapshot },
     });
 
     return { ok: true };

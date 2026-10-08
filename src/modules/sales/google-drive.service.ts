@@ -181,28 +181,43 @@ export class GoogleDriveService {
     'diciembre',
   ] as const;
 
-  /** Año/mes en zona de negocio. Mes: `01-enero`. */
-  private resolveYearMonth(fecha?: string | null): { year: string; month: string } {
+  /** Año/mes/día en zona de negocio. Mes: `10-octubre`. Día: `07`. */
+  private resolveYearMonthDay(fecha?: string | Date | null): {
+    year: string;
+    month: string;
+    day: string;
+  } {
     const tz =
       this.config.get<string>('BUSINESS_TIMEZONE')?.trim() ||
       'America/Mexico_City';
-    const fromFecha = fecha?.trim()?.slice(0, 10);
-    let date: Date;
-    if (fromFecha && /^\d{4}-\d{2}-\d{2}$/.test(fromFecha)) {
-      date = new Date(`${fromFecha}T12:00:00`);
-    } else {
-      date = new Date();
-    }
+    const fromFecha = this.calendarDate(fecha);
+    const date =
+      fromFecha && /^\d{4}-\d{2}-\d{2}$/.test(fromFecha)
+        ? new Date(`${fromFecha}T12:00:00`)
+        : new Date();
     const parts = new Intl.DateTimeFormat('en-CA', {
       timeZone: tz,
       year: 'numeric',
       month: '2-digit',
+      day: '2-digit',
     }).formatToParts(date);
     const year = parts.find((p) => p.type === 'year')?.value ?? '0000';
     const monthNum = parts.find((p) => p.type === 'month')?.value ?? '01';
+    const day = parts.find((p) => p.type === 'day')?.value ?? '01';
     const idx = Math.max(0, Math.min(11, Number(monthNum) - 1));
     const month = `${monthNum}-${GoogleDriveService.MONTH_LABELS[idx]}`;
-    return { year, month };
+    return { year, month, day };
+  }
+
+  /** YYYY-MM-DD. Acepta texto o Date de la columna sin correr el día. */
+  private calendarDate(fecha?: string | Date | null): string {
+    if (fecha instanceof Date && !Number.isNaN(fecha.getTime())) {
+      const year = fecha.getUTCFullYear();
+      const month = String(fecha.getUTCMonth() + 1).padStart(2, '0');
+      const day = String(fecha.getUTCDate()).padStart(2, '0');
+      return `${year}-${month}-${day}`;
+    }
+    return String(fecha ?? '').trim().slice(0, 10);
   }
 
   private async findChildFolder(
@@ -249,24 +264,25 @@ export class GoogleDriveService {
   }
 
   /**
-   * Ruta: raíz → AÑO → MES → FOLIO-nombrecliente
+   * Ruta: raíz → AÑO → MES → DÍA → FOLIO-nombrecliente
    */
   private async createSaleFolder(params: {
     folio: number | string;
     titularName: string | null;
-    fecha?: string | null;
+    fecha?: string | Date | null;
   }) {
     if (!this.drive || !this.folderId) {
       throw new Error('Drive no configurado');
     }
-    const { year, month } = this.resolveYearMonth(params.fecha);
+    const { year, month, day } = this.resolveYearMonthDay(params.fecha);
     const client = this.sanitizeDriveName(params.titularName || 'Sin titular');
     const saleFolderName = `${params.folio}-${client}`;
 
     const yearFolder = await this.findOrCreateFolder(this.folderId, year);
     const monthFolder = await this.findOrCreateFolder(yearFolder.id, month);
+    const dayFolder = await this.findOrCreateFolder(monthFolder.id, day);
     const saleFolder = await this.findOrCreateFolder(
-      monthFolder.id,
+      dayFolder.id,
       saleFolderName,
     );
 
@@ -277,7 +293,7 @@ export class GoogleDriveService {
 
     return {
       id: saleFolder.id,
-      name: `${year}/${month}/${saleFolderName}`,
+      name: `${year}/${month}/${day}/${saleFolderName}`,
       webViewLink,
     };
   }
@@ -425,7 +441,7 @@ export class GoogleDriveService {
   async uploadSaleDocuments(params: {
     saleId: number;
     titularName: string | null;
-    /** Fecha del contrato (YYYY-MM-DD); define carpeta AÑO/MES. */
+    /** Fecha del contrato (YYYY-MM-DD); define carpeta AÑO/MES/DÍA. */
     fecha?: string | null;
     documentos: Record<string, unknown>;
     /** Vista previa del contrato generada en el front (opcional). */
@@ -477,6 +493,10 @@ export class GoogleDriveService {
     }[] = [];
 
     const entries: { key: string; label: string }[] = [
+      { key: 'ineFrente', label: 'INE-Frente' },
+      { key: 'ineReverso', label: 'INE-Reverso' },
+      { key: 'tarjetaFrente', label: 'Tarjeta-Frente' },
+      { key: 'tarjetaReverso', label: 'Tarjeta-Reverso' },
       { key: 'comprobanteDomicilio', label: 'Comprobante' },
       { key: 'constanciaSituacionFiscal', label: 'ConstanciaFiscal' },
       { key: 'ticketPago', label: 'Ticket' },

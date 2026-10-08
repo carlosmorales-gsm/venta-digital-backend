@@ -24,6 +24,25 @@ export class AppSettings {
   })
   maxDiscountAmount!: string;
 
+  /** Si está activo, los vendedores entran con la contraseña definida aquí. */
+  @Column({ name: 'seller_password_login', type: 'boolean', default: false })
+  sellerPasswordLogin!: boolean;
+
+  /** Hash bcrypt de la contraseña compartida de vendedores. Nunca se expone. */
+  @Column({ name: 'seller_access_password_hash', type: 'text', nullable: true })
+  sellerAccessPasswordHash!: string | null;
+
+  /**
+   * Fin de vigencia (exclusivo). La contraseña vale hasta el final
+   * del día siguiente al que se definió, en la zona de negocio.
+   */
+  @Column({
+    name: 'seller_access_password_expires_at',
+    type: 'timestamptz',
+    nullable: true,
+  })
+  sellerAccessPasswordExpiresAt!: Date | null;
+
   @UpdateDateColumn({ name: 'updated_at', type: 'timestamptz' })
   updatedAt!: Date;
 }
