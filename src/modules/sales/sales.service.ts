@@ -641,12 +641,15 @@ export class SalesService {
         frecuencia === 'CONTADO' ||
         frecuencia.includes('CONTADO') ||
         frecuencia.includes('UNA SOLA');
+      const planKind = String(plan?.planKind || '').toUpperCase();
+      const omiteDomicilio =
+        esContado && planKind === PlanKind.PLAN_FUTURO;
       if (!hasIne) {
         throw new BadRequestException(
           'Debes adjuntar INE (frente y reverso)',
         );
       }
-      if (!esContado && !payload.documentos?.comprobanteDomicilio) {
+      if (!omiteDomicilio && !payload.documentos?.comprobanteDomicilio) {
         throw new BadRequestException(
           'Debes adjuntar el comprobante de domicilio',
         );
