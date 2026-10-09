@@ -31,6 +31,12 @@ export type OdooClienteContacto = {
   razonSocial?: string;
   rfc?: string;
   facturaCp?: string;
+  mismaDireccionFactura?: string;
+  facturaDireccion?: string;
+  facturaColonia?: string;
+  facturaMunicipio?: string;
+  facturaEstado?: string;
+  facturaPais?: string;
   regimenFiscal?: string;
   regimenFiscalOtro?: string;
   telefonoFactura?: string;

@@ -269,6 +269,12 @@ export function saleToPayload(sale: Sale): Record<string, unknown> {
           razonSocial: h.razonSocial,
           rfc: h.rfc,
           facturaCp: h.facturaCp,
+          mismaDireccionFactura: h.mismaDireccionFactura,
+          facturaDireccion: h.facturaDireccion,
+          facturaColonia: h.facturaColonia,
+          facturaMunicipio: h.facturaMunicipio,
+          facturaEstado: h.facturaEstado,
+          facturaPais: h.facturaPais,
           regimenFiscal: h.regimenFiscal,
           regimenFiscalOtro: h.regimenFiscalOtro,
           telefonoFactura: h.telefonoFactura,
@@ -723,6 +729,12 @@ export function applyPayloadToSale(sale: Sale, payload: SaleFormPayloadDto) {
   h.razonSocial = s(c.razonSocial);
   h.rfc = s(c.rfc).toUpperCase();
   h.facturaCp = s(c.facturaCp);
+  h.mismaDireccionFactura = s(c.mismaDireccionFactura).toUpperCase();
+  h.facturaDireccion = s(c.facturaDireccion);
+  h.facturaColonia = s(c.facturaColonia);
+  h.facturaMunicipio = s(c.facturaMunicipio);
+  h.facturaEstado = s(c.facturaEstado);
+  h.facturaPais = s(c.facturaPais);
   h.regimenFiscal = s(c.regimenFiscal).toUpperCase();
   h.regimenFiscalOtro = s(c.regimenFiscalOtro);
   h.telefonoFactura = normalizeMxPhone(c.telefonoFactura);

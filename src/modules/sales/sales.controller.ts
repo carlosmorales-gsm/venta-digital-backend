@@ -39,9 +39,22 @@ export class SalesController {
   /** Listado: el JWT define el alcance (vendedor = propias, mesa = global). */
   @Get()
   @Roles(UserType.VENDEDOR, UserType.MONITOR, UserType.ADMIN)
-  list(@CurrentUser() user: AuthUserPayload) {
+  list(
+    @CurrentUser() user: AuthUserPayload,
+    @Query('dateFrom') dateFrom?: string,
+    @Query('dateTo') dateTo?: string,
+    @Query('client') client?: string,
+    @Query('q') query?: string,
+    @Query('timeZone') timeZone?: string,
+  ) {
     if (user.type === UserType.VENDEDOR) {
-      return this.salesService.listOwnSales(user.userId);
+      return this.salesService.listOwnSales(user.userId, {
+        dateFrom,
+        dateTo,
+        client,
+        query,
+        timeZone,
+      });
     }
     if (
       user.type !== UserType.ADMIN &&

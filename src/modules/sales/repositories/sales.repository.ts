@@ -23,6 +23,24 @@ const LIST_STATUSES = [
   SaleStatus.REJECTED,
 ];
 
+const FOLDED_NAME = `translate(lower(coalesce(s.titular_name, '')), 'áéíóúüñ', 'aeiouun')`;
+const FOLDED_CONTRATO = `translate(lower(coalesce(s.contrato, '')), 'áéíóúüñ', 'aeiouun')`;
+
+export type SellerSaleListFilter = {
+  createdFrom?: Date;
+  createdTo?: Date;
+  client?: string;
+  query?: string;
+};
+
+function foldSearch(value: string | undefined): string {
+  return (value || '')
+    .normalize('NFD')
+    .replace(/\p{M}/gu, '')
+    .toLowerCase()
+    .trim();
+}
+
 const CONCILIATION_STATUSES = [
   SaleStatus.COMPLETED,
   SaleStatus.PENDING_VALIDATION,
@@ -145,12 +163,42 @@ export class SalesRepository {
     return ordered;
   }
 
-  /** Listado del vendedor: solo fila `sales`. */
-  findSummariesBySellerId(sellerId: number): Promise<Sale[]> {
-    return this.repo.find({
-      where: { sellerId },
-      order: { updatedAt: 'DESC' },
-    });
+  /** Listado del vendedor: solo fila `sales`, acotado por fecha y cliente. */
+  findSummariesBySellerId(
+    sellerId: number,
+    filter?: SellerSaleListFilter,
+  ): Promise<Sale[]> {
+    const qb = this.repo
+      .createQueryBuilder('s')
+      .where('s.seller_id = :sellerId', { sellerId });
+
+    if (filter?.createdFrom) {
+      qb.andWhere('s.created_at >= :createdFrom', {
+        createdFrom: filter.createdFrom,
+      });
+    }
+    if (filter?.createdTo) {
+      qb.andWhere('s.created_at < :createdTo', { createdTo: filter.createdTo });
+    }
+
+    const client = foldSearch(filter?.client);
+    const query = foldSearch(filter?.query);
+    if (client) {
+      qb.andWhere(`${FOLDED_NAME} = :client`, { client });
+    } else if (query) {
+      const folio = query.match(/^d-(\d+)$/);
+      const id = folio
+        ? Number(folio[1])
+        : /^\d+$/.test(query)
+          ? Number(query)
+          : 0;
+      qb.andWhere(
+        `(${FOLDED_NAME} LIKE :like OR ${FOLDED_CONTRATO} LIKE :like OR (:saleId > 0 AND s.id = :saleId))`,
+        { like: `%${query}%`, saleId: id },
+      );
+    }
+
+    return qb.orderBy('s.updated_at', 'DESC').getMany();
   }
 
   findForMonitor(): Promise<Sale[]> {
