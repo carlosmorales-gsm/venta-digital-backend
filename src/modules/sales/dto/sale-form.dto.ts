@@ -207,6 +207,34 @@ export class SalePagoDto {
   @IsOptional() @IsString() nombreAsesor?: string;
 }
 
+export class SaleMascotaDto {
+  @IsOptional() @IsString() @MaxLength(180) name?: string;
+  @IsOptional() @IsBoolean() isFinado?: boolean;
+  @IsOptional() @IsString() @MaxLength(40) finadoDate?: string;
+  @IsOptional() @Type(() => Number) @IsInt() especieId?: number | null;
+  @IsOptional() @IsString() @MaxLength(180) especieName?: string;
+  @IsOptional() @Type(() => Number) @IsInt() razaId?: number | null;
+  @IsOptional() @IsString() @MaxLength(180) razaName?: string;
+  @IsOptional() @IsString() @MaxLength(80) color?: string;
+  @IsOptional() @IsString() @MaxLength(500) rasgosParticulares?: string;
+  @IsOptional() @Type(() => Number) @IsInt() tamanoId?: number | null;
+  @IsOptional() @IsString() @MaxLength(80) tamanoName?: string;
+  @IsOptional() @IsString() @MaxLength(40) tamanoCode?: string;
+  @IsOptional() @IsString() @MaxLength(40) peso?: string;
+  @IsOptional() @IsString() @MaxLength(20) genero?: string;
+  @IsOptional() @IsString() @MaxLength(40) birthDate?: string;
+  @IsOptional() @IsString() @MaxLength(20) lugarDeceso?: string;
+  @IsOptional() @IsString() @MaxLength(180) veterinaria?: string;
+  @IsOptional() @IsString() @MaxLength(40) deathDatetime?: string;
+  @IsOptional() @IsString() @MaxLength(80) microchipId?: string;
+  @IsOptional() @IsBoolean() collar?: boolean;
+  @IsOptional() @IsBoolean() placaTestigo?: boolean;
+  @IsOptional() @IsString() @MaxLength(80) placaTestigoNumero?: string;
+  @IsOptional() @IsString() @MaxLength(40) recepcionDatetime?: string;
+  @IsOptional() @IsString() @MaxLength(2000) notas?: string;
+  @IsOptional() @IsString() @MaxLength(2000) comentarios?: string;
+}
+
 export class SaleFormPayloadDto {
   @IsOptional() @ValidateNested() @Type(() => SaleMetaDto) meta?: SaleMetaDto;
   @IsOptional() @ValidateNested() @Type(() => SaleContactoDto) contacto?: SaleContactoDto;
@@ -216,6 +244,10 @@ export class SaleFormPayloadDto {
   @ValidateNested({ each: true })
   @Type(() => SaleBeneficiaryDto)
   beneficiarios?: SaleBeneficiaryDto[];
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => SaleMascotaDto)
+  mascota?: SaleMascotaDto;
   @IsOptional()
   @ValidateNested()
   @Type(() => SaleDerechohabientesDto)

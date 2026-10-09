@@ -29,6 +29,7 @@ export class OdooController {
     @Query('q') q?: string,
     @Query('ids') ids?: string,
     @Query('limit') limit?: string,
+    @Query('petFuturePlan') petFuturePlan?: string,
   ) {
     const kind = (planKind || '').trim().toUpperCase();
     const companyId: 1 | 2 = kind === 'PARQUE' ? 1 : kind === 'PLAN_FUTURO' ? 2 : 0 as any;
@@ -37,12 +38,15 @@ export class OdooController {
         'planKind debe ser PARQUE o PLAN_FUTURO',
       );
     }
+    const pet = ['1', 'true'].includes(
+      String(petFuturePlan || '').trim().toLowerCase(),
+    );
     const parsedIds = (ids || '')
       .split(',')
       .map((value) => Number(value.trim()))
       .filter((id) => Number.isFinite(id) && id > 0);
     if (parsedIds.length) {
-      return this.odoo.getPlanesByIds(companyId, parsedIds);
+      return this.odoo.getPlanesByIds(companyId, parsedIds, pet);
     }
     if (!(q || '').trim()) {
       throw new BadRequestException('Indica el texto a buscar (q) o ids');
@@ -51,7 +55,28 @@ export class OdooController {
       companyId,
       q!.trim(),
       limit ? Number(limit) : 20,
+      pet,
     );
+  }
+
+  @Get('mascotas/especies')
+  @Roles(UserType.VENDEDOR, UserType.MONITOR, UserType.ADMIN)
+  listMascotaEspecies() {
+    return this.odoo.listMascotaEspecies();
+  }
+
+  @Get('mascotas/razas')
+  @Roles(UserType.VENDEDOR, UserType.MONITOR, UserType.ADMIN)
+  listMascotaRazas(@Query('especieId') especieId?: string) {
+    const id = Number(especieId);
+    if (!id) throw new BadRequestException('especieId es obligatorio');
+    return this.odoo.listMascotaRazas(id);
+  }
+
+  @Get('mascotas/tamanos')
+  @Roles(UserType.VENDEDOR, UserType.MONITOR, UserType.ADMIN)
+  listMascotaTamanos() {
+    return this.odoo.listMascotaTamanos();
   }
 
   @Get('clientes')

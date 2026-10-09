@@ -170,7 +170,47 @@ export class OdooGsmClient {
   /**
    * companyId Odoo: 1 Parque · 2 Plan a futuro
    */
-  async getPlanesByIds(companyId: 1 | 2, ids: number[]) {
+  async listMascotaEspecies() {
+    return this.getCatalog('/productos/mascotas/especies');
+  }
+
+  async listMascotaRazas(especieId: number) {
+    return this.getCatalog('/productos/mascotas/razas', { especieId });
+  }
+
+  async listMascotaTamanos() {
+    return this.getCatalog('/productos/mascotas/tamanos');
+  }
+
+  private async getCatalog(
+    path: string,
+    params?: Record<string, string | number>,
+  ) {
+    if (!this.http) {
+      throw new ServiceUnavailableException(
+        'Integración Odoo no configurada (API_ODOO_GSM_URL)',
+      );
+    }
+    try {
+      const { data } = await this.http.get(path, { params });
+      return Array.isArray(data) ? data : [];
+    } catch (e: any) {
+      const msg =
+        e?.response?.data?.message ||
+        e?.message ||
+        'Error al consultar catálogos de mascota';
+      this.logger.error(`getCatalog ${path}: ${msg}`);
+      throw new ServiceUnavailableException(
+        typeof msg === 'string' ? msg : 'Error al consultar catálogos de mascota',
+      );
+    }
+  }
+
+  async getPlanesByIds(
+    companyId: 1 | 2,
+    ids: number[],
+    petFuturePlan = false,
+  ) {
     if (!this.http) {
       throw new ServiceUnavailableException(
         'Integración Odoo no configurada (API_ODOO_GSM_URL)',
@@ -181,7 +221,13 @@ export class OdooGsmClient {
     try {
       const { data } = await this.http.get<OdooPlanProduct[]>(
         '/productos/planes',
-        { params: { companyId, ids: uniqueIds.join(',') } },
+        {
+          params: {
+            companyId,
+            ids: uniqueIds.join(','),
+            petFuturePlan: petFuturePlan ? '1' : undefined,
+          },
+        },
       );
       const rows = (Array.isArray(data) ? data : []).map((row) =>
         this.mapPlan(row as unknown as Record<string, unknown>),
@@ -200,7 +246,12 @@ export class OdooGsmClient {
     }
   }
 
-  async searchPlanes(companyId: 1 | 2, q: string, limit = 20) {
+  async searchPlanes(
+    companyId: 1 | 2,
+    q: string,
+    limit = 20,
+    petFuturePlan = false,
+  ) {
     if (!this.http) {
       throw new ServiceUnavailableException(
         'Integración Odoo no configurada (API_ODOO_GSM_URL)',
@@ -209,7 +260,14 @@ export class OdooGsmClient {
     try {
       const { data } = await this.http.get<OdooPlanProduct[]>(
         '/productos/planes',
-        { params: { companyId, q, limit } },
+        {
+          params: {
+            companyId,
+            q,
+            limit,
+            petFuturePlan: petFuturePlan ? '1' : undefined,
+          },
+        },
       );
       return (Array.isArray(data) ? data : []).map((row) =>
         this.mapPlan(row as unknown as Record<string, unknown>),

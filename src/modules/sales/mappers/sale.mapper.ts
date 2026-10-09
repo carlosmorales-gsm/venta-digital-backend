@@ -51,6 +51,21 @@ function tipoVentaFromEstatus(estatus: string): string {
   return 'NUEVA';
 }
 
+function tipoVentaOf(sale: { estatus: string; funepet?: boolean }): string {
+  if (sale.funepet) return 'FUNEPET';
+  return tipoVentaFromEstatus(sale.estatus);
+}
+
+function parseMascota(raw: string | null | undefined): Record<string, unknown> {
+  if (!raw?.trim()) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
 export function parseReconocimientoVentas(raw: string | null | undefined) {
   if (!raw?.trim()) return [];
   try {
@@ -74,6 +89,7 @@ function estatusFromTipoVenta(tipo?: string): string | null {
   if (t === 'RECONOCIMIENTO') return 'REACTIVACION';
   if (t === 'MEJORA') return 'MEJORA';
   if (t === 'MINORIA') return 'MINORIA';
+  if (t === 'FUNEPET') return 'ACTIVO';
   return null;
 }
 
@@ -168,7 +184,7 @@ export function saleToPublic(sale: Sale) {
     driveFolderUrl: sale.driveFolderUrl,
     driveFolderPath: sale.driveFolderPath,
     correctionFields: parseCorrectionRequest(sale.correctionRequest).fields,
-    tipoVenta: tipoVentaFromEstatus(sale.estatus),
+    tipoVenta: tipoVentaOf(sale),
     recognizedBalance: recognizedFromVentas(sale.reconocimientoVentas),
     recognitionOriginIds: reconocimientoVentas
       .map((item: { id?: number }) => Number(item?.id) || 0)
@@ -235,7 +251,7 @@ export function saleToPayload(sale: Sale): Record<string, unknown> {
       serviceTypeName: sale.serviceTypeName,
       folioSolicitud: formatDigitalFolio(sale.folioSolicitud || sale.id),
       fechaServicio: sale.fechaServicio ?? '',
-      tipoVenta: tipoVentaFromEstatus(sale.estatus),
+      tipoVenta: tipoVentaOf(sale),
       estatus: sale.estatus,
       anterior: sale.anterior,
       verificacion: sale.verificacion,
@@ -291,6 +307,7 @@ export function saleToPayload(sale: Sale): Record<string, unknown> {
         }
       : {},
     beneficiarios: bens.map((b) => benToPayload(b)),
+    mascota: parseMascota(sale.mascota),
     derechohabientes: {
       titularSustituto: substituteToPayload(ts),
       primerBeneficiario: benToPayload(bens[0]),
@@ -600,8 +617,10 @@ export function applyPayloadToSale(sale: Sale, payload: SaleFormPayloadDto) {
   sale.serviceTypeName = s(meta.serviceTypeName);
   // folioSolicitud: lo asigna el servidor (D-{id de venta})
   sale.fechaServicio = dateOrNull(meta.fechaServicio);
+  sale.funepet = s(meta.tipoVenta).toUpperCase() === 'FUNEPET';
   sale.estatus =
     estatusFromTipoVenta(meta.tipoVenta) || s(meta.estatus, 'ACTIVO');
+  sale.mascota = payload.mascota ? JSON.stringify(payload.mascota) : '';
   sale.anterior = s(meta.anterior);
   sale.verificacion = s(meta.verificacion);
   sale.reconocimientoVentas = stringifyReconocimientoVentas(

@@ -78,6 +78,14 @@ export class Sale {
   @Column({ type: 'varchar', length: 40, default: 'ACTIVO' })
   estatus!: string;
 
+  /** Venta Funepet. El estatus de contrato sigue siendo ACTIVO. */
+  @Column({ name: 'funepet', type: 'boolean', default: false })
+  funepet!: boolean;
+
+  /** JSON de mascota.mascota. Vacío si no es Funepet. */
+  @Column({ name: 'mascota', type: 'text', default: '' })
+  mascota!: string;
+
   @Column({ type: 'varchar', length: 80, default: '' })
   anterior!: string;
 

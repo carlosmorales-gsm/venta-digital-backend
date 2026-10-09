@@ -178,16 +178,26 @@ export class SalesService {
       payloadBody.pago && typeof payloadBody.pago === 'object'
         ? (payloadBody.pago as Record<string, unknown>)
         : {};
+    const meta =
+      payloadBody.meta && typeof payloadBody.meta === 'object'
+        ? { ...(payloadBody.meta as Record<string, unknown>) }
+        : {};
+    if (String(meta.tipoVenta || '').toUpperCase() === 'FUNEPET' || sale.funepet) {
+      meta.tipoVenta = 'NUEVA';
+      meta.estatus = 'ACTIVO';
+    }
     const vdSellerName = (sale.sellerName || '').trim();
     const vdManagerName = (sale.nombreJefeVentas || '').trim();
     return {
       ...publicSale,
+      tipoVenta: sale.funepet ? 'NUEVA' : publicSale.tipoVenta,
       sellerId: 2,
       sellerName: '',
       vdSellerName,
       vdManagerName,
       payload: {
         ...payloadBody,
+        meta,
         pago: {
           ...pago,
           nombreAsesor: '',
@@ -503,13 +513,31 @@ export class SalesService {
       throw new BadRequestException((e as Error).message);
     }
 
+    const funepet =
+      String(payload.meta?.tipoVenta || '').trim().toUpperCase() === 'FUNEPET';
     const bens = payload.beneficiarios ?? [];
-    const first = bens[0];
-    if (!first || (!first.nombres?.trim() && !first.apellidoPaterno?.trim())) {
-      throw new BadRequestException('Debes capturar al menos un beneficiario');
-    }
-    if (bens.length > 2) {
-      throw new BadRequestException('Solo puedes agregar hasta 2 beneficiarios');
+    if (funepet) {
+      const pet = payload.mascota;
+      if (!pet?.name?.trim()) {
+        throw new BadRequestException('Captura el nombre de la mascota');
+      }
+      if (!pet.especieId) {
+        throw new BadRequestException('Selecciona la especie de la mascota');
+      }
+      if (!pet.tamanoId) {
+        throw new BadRequestException('Selecciona el tamaño de la mascota');
+      }
+      if (pet.placaTestigo && !pet.placaTestigoNumero?.trim()) {
+        throw new BadRequestException('Captura el número de placa testigo');
+      }
+    } else {
+      const first = bens[0];
+      if (!first || (!first.nombres?.trim() && !first.apellidoPaterno?.trim())) {
+        throw new BadRequestException('Debes capturar al menos un beneficiario');
+      }
+      if (bens.length > 2) {
+        throw new BadRequestException('Solo puedes agregar hasta 2 beneficiarios');
+      }
     }
 
     const branchId = Number(payload.meta?.branchId);
