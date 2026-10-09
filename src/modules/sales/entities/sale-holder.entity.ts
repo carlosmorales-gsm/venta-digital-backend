@@ -50,6 +50,24 @@ export class SaleHolder {
   @Column({ name: 'factura_cp', type: 'varchar', length: 10, default: '' })
   facturaCp!: string;
 
+  @Column({ name: 'misma_direccion_factura', type: 'varchar', length: 10, default: '' })
+  mismaDireccionFactura!: string;
+
+  @Column({ name: 'factura_direccion', type: 'varchar', length: 220, default: '' })
+  facturaDireccion!: string;
+
+  @Column({ name: 'factura_colonia', type: 'varchar', length: 120, default: '' })
+  facturaColonia!: string;
+
+  @Column({ name: 'factura_municipio', type: 'varchar', length: 120, default: '' })
+  facturaMunicipio!: string;
+
+  @Column({ name: 'factura_estado', type: 'varchar', length: 80, default: '' })
+  facturaEstado!: string;
+
+  @Column({ name: 'factura_pais', type: 'varchar', length: 80, default: '' })
+  facturaPais!: string;
+
   @Column({ name: 'regimen_fiscal', type: 'varchar', length: 10, default: '' })
   regimenFiscal!: string;
 

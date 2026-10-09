@@ -574,6 +574,20 @@ export class SalesService {
       } catch (e) {
         throw new BadRequestException((e as Error).message);
       }
+      if ((c.mismaDireccionFactura || '').trim().toUpperCase() === 'NO') {
+        if (!(c.facturaDireccion || '').trim()) {
+          throw new BadRequestException('La dirección de facturación es obligatoria');
+        }
+        if (!(c.facturaColonia || '').trim()) {
+          throw new BadRequestException('La colonia de facturación es obligatoria');
+        }
+        if (!(c.facturaMunicipio || '').trim()) {
+          throw new BadRequestException('La ciudad de facturación es obligatoria');
+        }
+        if (!(c.facturaEstado || '').trim()) {
+          throw new BadRequestException('El estado de facturación es obligatorio');
+        }
+      }
     }
 
     const entregaTitular = (
@@ -684,9 +698,18 @@ export class SalesService {
     }
   }
 
-  async listOwnSales(sellerId: number) {
+  async listOwnSales(
+    sellerId: number,
+    filter?: { dateFrom?: string; dateTo?: string; client?: string; query?: string; timeZone?: string },
+  ) {
     await this.purgeExpired();
-    const items = await this.salesRepository.findSummariesBySellerId(sellerId);
+    const range = sellerListRange(filter?.dateFrom, filter?.dateTo, filter?.timeZone);
+    const items = await this.salesRepository.findSummariesBySellerId(sellerId, {
+      createdFrom: range.from,
+      createdTo: range.to,
+      client: filter?.client,
+      query: filter?.query,
+    });
     await this.pullOdooLinksIfMissing(items);
     await this.refreshSignedStatuses(items);
     void this.pushUnsyncedReceptionsToOdoo(items).catch((e) => {
@@ -707,13 +730,18 @@ export class SalesService {
     });
     const drafts = visible.filter((s) => s.status === SaleStatus.DRAFT);
     const pipeline = visible.filter((s) => s.status !== SaleStatus.DRAFT);
+    const draftCount = await this.salesRepository.countActiveDrafts(
+      sellerId,
+      new Date(),
+      draftTtlHours,
+    );
 
     return {
       scope: 'own' as const,
       items: visible.map(saleToListItem),
       drafts: drafts.map(saleToListItem),
       submitted: pipeline.map(saleToListItem),
-      draftCount: drafts.length,
+      draftCount,
       draftLimit,
       draftTtlHours,
       total: visible.length,
@@ -2582,4 +2610,50 @@ export class SalesService {
   async submit(id: number | null, user: AuthUserPayload, dto: UpsertSaleDto) {
     return this.finalizeCapture(id, user, dto);
   }
+}
+
+/** Inicio inclusive y fin exclusivo del rango, en la zona del vendedor. */
+function sellerListRange(
+  dateFrom: string | undefined,
+  dateTo: string | undefined,
+  timeZone: string | undefined,
+): { from?: Date; to?: Date } {
+  const zone = timeZone?.trim() || 'America/Mexico_City';
+  const from = isoDayStart(dateFrom, zone);
+  const toDay = isoDayStart(dateTo, zone);
+  return {
+    from,
+    to: toDay ? new Date(toDay.getTime() + 24 * 60 * 60 * 1000) : undefined,
+  };
+}
+
+function isoDayStart(iso: string | undefined, timeZone: string): Date | undefined {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec((iso || '').trim());
+  if (!match) return undefined;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const utcGuess = new Date(Date.UTC(year, month - 1, day, 12, 0, 0));
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    hourCycle: 'h23',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  }).formatToParts(utcGuess);
+  const pick = (type: Intl.DateTimeFormatPartTypes) =>
+    Number(parts.find((part) => part.type === type)?.value ?? '0');
+  const zonedAsUtc = Date.UTC(
+    pick('year'),
+    pick('month') - 1,
+    pick('day'),
+    pick('hour') % 24,
+    pick('minute'),
+    pick('second'),
+  );
+  const offsetMs = zonedAsUtc - utcGuess.getTime();
+  return new Date(Date.UTC(year, month - 1, day, 0, 0, 0) - offsetMs);
 }

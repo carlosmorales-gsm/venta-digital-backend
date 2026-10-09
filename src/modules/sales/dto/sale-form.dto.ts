@@ -45,6 +45,12 @@ export class SaleContactoDto extends SalePersonDto {
   @IsOptional() @IsString() razonSocial?: string;
   @IsOptional() @IsString() rfc?: string;
   @IsOptional() @IsString() facturaCp?: string;
+  @IsOptional() @IsString() mismaDireccionFactura?: string;
+  @IsOptional() @IsString() facturaDireccion?: string;
+  @IsOptional() @IsString() facturaColonia?: string;
+  @IsOptional() @IsString() facturaMunicipio?: string;
+  @IsOptional() @IsString() facturaEstado?: string;
+  @IsOptional() @IsString() facturaPais?: string;
   @IsOptional() @IsString() regimenFiscal?: string;
   @IsOptional() @IsString() regimenFiscalOtro?: string;
   @IsOptional() @IsString() telefonoFactura?: string;

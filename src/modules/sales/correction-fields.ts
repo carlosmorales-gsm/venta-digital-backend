@@ -74,6 +74,13 @@ export const CORRECTION_FIELDS: CorrectionFieldDef[] = [
   field('factura', 'Factura', 'contacto.rfc', 'RFC'),
   field('factura', 'Factura', 'contacto.regimenFiscal', 'Régimen fiscal'),
   field('factura', 'Factura', 'contacto.telefonoFactura', 'Teléfono de factura'),
+  field('factura', 'Factura', 'contacto.facturaCp', 'C.P. de facturación'),
+  field('factura', 'Factura', 'contacto.mismaDireccionFactura', 'Misma dirección de facturación'),
+  field('factura', 'Factura', 'contacto.facturaDireccion', 'Dirección de facturación'),
+  field('factura', 'Factura', 'contacto.facturaColonia', 'Colonia de facturación'),
+  field('factura', 'Factura', 'contacto.facturaMunicipio', 'Ciudad de facturación'),
+  field('factura', 'Factura', 'contacto.facturaEstado', 'Estado de facturación'),
+  field('factura', 'Factura', 'contacto.facturaPais', 'País de facturación'),
 
   field('titular', 'Titular sustituto', 'derechohabientes.titularSustituto.nombres', 'Nombre(s)'),
   field('titular', 'Titular sustituto', 'derechohabientes.titularSustituto.apellidoPaterno', 'Apellido paterno'),
