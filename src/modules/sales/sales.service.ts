@@ -195,6 +195,7 @@ export class SalesService {
       sellerName: '',
       vdSellerName,
       vdManagerName,
+      funepet: Boolean(sale.funepet),
       payload: {
         ...payloadBody,
         meta,
