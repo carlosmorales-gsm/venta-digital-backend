@@ -88,6 +88,30 @@ export const CONTRATO_STAMPS: Partial<Record<DocumentKind, PdfTextStamp>> = {
     maxW: 120,
     fontSize: 9,
   },
+  /** Celda “Contrato donde se aplica” de FOR-GSM-CMR-08. */
+  [DocumentKind.CARTA_RECONOCIMIENTO]: {
+    pageIndex: 0,
+    x: 230,
+    y: 500,
+    boxTop: 488,
+    boxH: 14,
+    maxW: 290,
+    fontSize: 10,
+  },
+};
+
+/**
+ * Carátula Funepet: el recuadro CONTRATO está debajo de la fecha,
+ * no en el renglón del folio de solicitud.
+ */
+export const FUNEPET_CARATULA_STAMP: PdfTextStamp = {
+  pageIndex: 0,
+  x: 486,
+  y: 120.4,
+  boxTop: 112,
+  boxH: 11.4,
+  maxW: 88,
+  fontSize: 7,
 };
 
 const DEFAULT_PAGE_H = 1009.13;

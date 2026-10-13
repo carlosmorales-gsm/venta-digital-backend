@@ -93,6 +93,8 @@ export type OdooCliente = {
 export type OdooVentaSuspendida = {
   id: number;
   folio: string;
+  /** Folio de solicitud Odoo (`x_studio_folio_solicitud`) de esa venta. */
+  folioSolicitud?: string;
   partnerId: number;
   partnerName: string;
   dateOrder: string;

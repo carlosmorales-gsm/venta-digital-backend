@@ -47,7 +47,11 @@ import { SettingsService } from '../settings/settings.service';
 import { DiscountsService } from '../discounts/discounts.service';
 import { OdooGsmClient, type OdooVdReceptionLink } from '../odoo/odoo-gsm.client';
 import { PlanKind } from './enums/plan-kind.enum';
-import { CONTRATO_STAMPS, stampTextOnPdf } from './utils/stamp-caratula-contrato';
+import {
+  CONTRATO_STAMPS,
+  FUNEPET_CARATULA_STAMP,
+  stampTextOnPdf,
+} from './utils/stamp-caratula-contrato';
 import { formatDigitalFolio } from './utils/digital-folio';
 import {
   correctionCompanionKey,
@@ -1597,10 +1601,75 @@ export class SalesService {
       [DocumentKind.CARTA_NOMINA]: 'CartaConsentimientoNomina',
       [DocumentKind.CARTA_FACTURA]: 'CartaRequerimientoFactura',
       [DocumentKind.CARTA_NO_FACTURA]: 'ConsentimientoNoFactura',
+      [DocumentKind.CARTA_RECONOCIMIENTO]: 'SolicitudReconocimientoSaldo',
     };
 
     for (const [kind, stamp] of Object.entries(CONTRATO_STAMPS)) {
       const docKind = kind as DocumentKind;
+      const box =
+        current.funepet && docKind === DocumentKind.CARATULA
+          ? FUNEPET_CARATULA_STAMP
+          : stamp;
+      if (docKind === DocumentKind.CARTA_RECONOCIMIENTO) {
+        let targets = (current.documents ?? []).filter(
+          (d) => d.kind === docKind && d.driveFileId,
+        );
+        if (!targets.length && current.driveFolderId) {
+          const found = await this.googleDrive.findSalePdfsInFolder(
+            current.driveFolderId,
+            'SolicitudReconocimientoSaldo',
+          );
+          for (const file of found) {
+            const doc = new SaleDocument();
+            doc.kind = docKind;
+            doc.name = file.name;
+            doc.mime = 'application/pdf';
+            doc.driveFileId = file.id;
+            doc.driveFileUrl = file.url;
+            doc.dataBase64 = null;
+            doc.saleId = sale.id;
+            await this.salesRepository.saveDocument(doc);
+            targets.push(doc);
+          }
+        }
+        if (!targets.length) {
+          this.logger.warn(
+            `Venta #${sale.id}: cotización ${contrato} sin ${docKind} en Drive; no se actualizó el folio`,
+          );
+          continue;
+        }
+        for (const doc of targets) {
+          if (!doc.driveFileId) continue;
+          try {
+            const downloaded = await this.googleDrive.downloadFileBase64(
+              doc.driveFileId,
+            );
+            if (!downloaded?.dataBase64) {
+              throw new Error(`No se pudo descargar ${docKind}`);
+            }
+            const stamped = stampTextOnPdf(
+              Buffer.from(downloaded.dataBase64, 'base64'),
+              folio,
+              box,
+            );
+            await this.googleDrive.updateFileBuffer(
+              doc.driveFileId,
+              'application/pdf',
+              stamped,
+            );
+            this.logger.log(
+              `Venta #${sale.id}: ${doc.name || docKind} Drive actualizado con contrato ${contrato}`,
+            );
+          } catch (e) {
+            this.logger.error(
+              `Venta #${sale.id}: no se actualizó ${docKind} en Drive — ${(e as Error).message}`,
+              (e as Error).stack,
+            );
+          }
+        }
+        continue;
+      }
+
       const existing = (current.documents ?? []).find((d) => d.kind === docKind);
       let fileId = existing?.driveFileId ?? null;
       if (!fileId && current.driveFolderId) {
@@ -1636,7 +1705,7 @@ export class SalesService {
         const stamped = stampTextOnPdf(
           Buffer.from(downloaded.dataBase64, 'base64'),
           folio,
-          stamp,
+          box,
         );
         await this.googleDrive.updateFileBuffer(
           fileId,
@@ -2232,7 +2301,12 @@ export class SalesService {
       sale.status === SaleStatus.COMPLETED ||
       sale.status === SaleStatus.PENDING_VALIDATION
     ) {
-      return { ...saleToListItem(sale), alreadySigned: true, payload: {} };
+      return {
+        ...saleToListItem(sale),
+        alreadySigned: true,
+        tipoVenta: sale.funepet ? 'FUNEPET' : sale.estatus,
+        payload: {},
+      };
     }
     if (sale.status !== SaleStatus.PENDING_SIGNATURE) {
       throw new BadRequestException(
@@ -2400,6 +2474,54 @@ export class SalesService {
       if (!prevNomina) docs.push(nominaDoc);
     }
 
+    const recognitionIncoming = Array.isArray(dto.solicitudReconocimientoPdfs)
+      ? dto.solicitudReconocimientoPdfs
+      : dto.solicitudReconocimientoPdf
+        ? [dto.solicitudReconocimientoPdf]
+        : null;
+    const recognitionPdfs = (recognitionIncoming ?? []).filter(
+      (pdf) => pdf?.dataBase64,
+    );
+    if (recognitionIncoming) {
+      for (let i = docs.length - 1; i >= 0; i -= 1) {
+        if (docs[i]?.kind === DocumentKind.CARTA_RECONOCIMIENTO) docs.splice(i, 1);
+      }
+      recognitionPdfs.forEach((pdf, index) => {
+        const reconDoc = new SaleDocument();
+        reconDoc.kind = DocumentKind.CARTA_RECONOCIMIENTO;
+        reconDoc.name =
+          pdf.name || `${sale.id}-SolicitudReconocimientoSaldo-${index + 1}.pdf`;
+        reconDoc.mime = pdf.mime || 'application/pdf';
+        reconDoc.dataBase64 = pdf.dataBase64 ?? null;
+        reconDoc.driveFileId = null;
+        reconDoc.driveFileUrl = null;
+        docs.push(reconDoc);
+      });
+    }
+
+    const noStationeryIncoming = Array.isArray(dto.cartaNoPapeleriaPdfs)
+      ? dto.cartaNoPapeleriaPdfs
+      : null;
+    const noStationeryPdfs = (noStationeryIncoming ?? []).filter(
+      (pdf) => pdf?.dataBase64,
+    );
+    if (noStationeryIncoming) {
+      for (let i = docs.length - 1; i >= 0; i -= 1) {
+        if (docs[i]?.kind === DocumentKind.CARTA_NO_PAPELERIA) docs.splice(i, 1);
+      }
+      noStationeryPdfs.forEach((pdf, index) => {
+        const letter = new SaleDocument();
+        letter.kind = DocumentKind.CARTA_NO_PAPELERIA;
+        letter.name =
+          pdf.name || `${sale.id}-CartaNoPapeleria-${index + 1}.pdf`;
+        letter.mime = pdf.mime || 'application/pdf';
+        letter.dataBase64 = pdf.dataBase64 ?? null;
+        letter.driveFileId = null;
+        letter.driveFileUrl = null;
+        docs.push(letter);
+      });
+    }
+
     if (dto.tarjetaPdf?.dataBase64) {
       const prevCard = docs.find((d) => d.kind === DocumentKind.TARJETA);
       const cardDoc = prevCard ?? new SaleDocument();
@@ -2431,12 +2553,8 @@ export class SalesService {
       return { name: d.name, mime: d.mime, dataBase64: d.dataBase64 };
     };
     const documentosPayload: Record<string, unknown> = {
-      ineFrente: docAtt(DocumentKind.INE_FRENTE),
-      ineReverso: docAtt(DocumentKind.INE_REVERSO),
       comprobanteDomicilio: docAtt(DocumentKind.COMPROBANTE),
       constanciaSituacionFiscal: docAtt(DocumentKind.CONSTANCIA_FISCAL),
-      tarjetaFrente: docAtt(DocumentKind.TARJETA_FRENTE),
-      tarjetaReverso: docAtt(DocumentKind.TARJETA_REVERSO),
       tarjetaPdf: docAtt(DocumentKind.TARJETA),
       reciboNomina: docAtt(DocumentKind.RECIBO_NOMINA),
       domiciliacionBanorte: docAtt(DocumentKind.BANORTE_DOM),
@@ -2466,10 +2584,6 @@ export class SalesService {
       domiciliacionBanorte: DocumentKind.BANORTE_DOM,
       tarjetaPdf: DocumentKind.TARJETA,
       inePdf: DocumentKind.INE,
-      ineFrente: DocumentKind.INE_FRENTE,
-      ineReverso: DocumentKind.INE_REVERSO,
-      tarjetaFrente: DocumentKind.TARJETA_FRENTE,
-      tarjetaReverso: DocumentKind.TARJETA_REVERSO,
     };
 
     if (this.googleDrive.isEnabled()) {
@@ -2488,6 +2602,8 @@ export class SalesService {
           reglamentoParqueFolletoPdf: dto.reglamentoParqueFolletoPdf ?? null,
           cartaAutorizacionPdf: dto.cartaAutorizacionPdf ?? null,
           cartaNominaPdf: dto.cartaNominaPdf ?? null,
+          solicitudReconocimientoPdfs: recognitionPdfs,
+          cartaNoPapeleriaPdfs: noStationeryPdfs,
           tarjetaPdf: dto.tarjetaPdf ?? docAtt(DocumentKind.TARJETA),
           inePdf: dto.inePdf ?? docAtt(DocumentKind.INE),
         });
@@ -2496,6 +2612,29 @@ export class SalesService {
         }
 
         for (const file of driveInfo.files) {
+          const reconMatch = /^solicitudReconocimientoPdf:(\d+)$/.exec(file.key);
+          const noStationeryMatch = /^cartaNoPapeleriaPdf:(\d+)$/.exec(file.key);
+          const indexed = reconMatch
+            ? {
+                kind: DocumentKind.CARTA_RECONOCIMIENTO,
+                index: Number(reconMatch[1]),
+              }
+            : noStationeryMatch
+              ? {
+                  kind: DocumentKind.CARTA_NO_PAPELERIA,
+                  index: Number(noStationeryMatch[1]),
+                }
+              : null;
+          if (indexed) {
+            const indexedDocs = docs.filter((d) => d.kind === indexed.kind);
+            const indexedDoc = indexedDocs[indexed.index];
+            if (!indexedDoc) continue;
+            indexedDoc.name = file.name;
+            indexedDoc.driveFileId = file.id;
+            indexedDoc.driveFileUrl = file.url;
+            indexedDoc.dataBase64 = null;
+            continue;
+          }
           const kind = driveKeyToKind[file.key];
           if (!kind) continue;
           let doc = docs.find((d) => d.kind === kind);
@@ -2512,6 +2651,7 @@ export class SalesService {
               kind === DocumentKind.REGLAMENTO_FOLLETO ||
               kind === DocumentKind.CARTA_AUTORIZACION ||
               kind === DocumentKind.CARTA_NOMINA ||
+              kind === DocumentKind.CARTA_RECONOCIMIENTO ||
               kind === DocumentKind.TARJETA ||
               kind === DocumentKind.INE
                 ? 'application/pdf'

@@ -435,7 +435,8 @@ export class GoogleDriveService {
   }
 
   /**
-   * Crea carpeta por venta y sube INE, comprobante, firma y carátula PDF.
+   * Crea carpeta por venta y sube los documentos. INE y tarjeta se
+   * guardan solo como el PDF de ambos lados.
    * El caller (signSale) falla el flujo si esta subida no es exitosa.
    */
   async uploadSaleDocuments(params: {
@@ -453,6 +454,8 @@ export class GoogleDriveService {
     reglamentoParqueFolletoPdf?: DriveAttachment | null;
     cartaAutorizacionPdf?: DriveAttachment | null;
     cartaNominaPdf?: DriveAttachment | null;
+    solicitudReconocimientoPdfs?: DriveAttachment[] | null;
+    cartaNoPapeleriaPdfs?: DriveAttachment[] | null;
     tarjetaPdf?: DriveAttachment | null;
     inePdf?: DriveAttachment | null;
   }): Promise<{
@@ -476,6 +479,8 @@ export class GoogleDriveService {
       reglamentoParqueFolletoPdf,
       cartaAutorizacionPdf,
       cartaNominaPdf,
+      solicitudReconocimientoPdfs,
+      cartaNoPapeleriaPdfs,
       tarjetaPdf,
       inePdf,
     } = params;
@@ -493,10 +498,6 @@ export class GoogleDriveService {
     }[] = [];
 
     const entries: { key: string; label: string }[] = [
-      { key: 'ineFrente', label: 'INE-Frente' },
-      { key: 'ineReverso', label: 'INE-Reverso' },
-      { key: 'tarjetaFrente', label: 'Tarjeta-Frente' },
-      { key: 'tarjetaReverso', label: 'Tarjeta-Reverso' },
       { key: 'comprobanteDomicilio', label: 'Comprobante' },
       { key: 'constanciaSituacionFiscal', label: 'ConstanciaFiscal' },
       { key: 'ticketPago', label: 'Ticket' },
@@ -676,6 +677,56 @@ export class GoogleDriveService {
       }
     }
 
+    for (const [index, pdf] of (solicitudReconocimientoPdfs ?? []).entries()) {
+      if (!pdf?.dataBase64) continue;
+      const buffer = this.bufferFromAttachment(pdf);
+      if (!buffer) continue;
+      const safeName = (pdf.name || `solicitud-${index + 1}.pdf`).replace(
+        /[^\w.-]+/g,
+        '-',
+      );
+      const filename = safeName.startsWith(`${folio}-`)
+        ? safeName
+        : `${folio}-SolicitudReconocimientoSaldo-${safeName}`;
+      const uploaded = await this.uploadBuffer(
+        folder.id,
+        filename,
+        pdf.mime || 'application/pdf',
+        buffer,
+      );
+      files.push({
+        key: `solicitudReconocimientoPdf:${index}`,
+        id: uploaded.id,
+        name: uploaded.name,
+        url: uploaded.webViewLink,
+      });
+    }
+
+    for (const [index, pdf] of (cartaNoPapeleriaPdfs ?? []).entries()) {
+      if (!pdf?.dataBase64) continue;
+      const buffer = this.bufferFromAttachment(pdf);
+      if (!buffer) continue;
+      const safeName = (pdf.name || `no-papeleria-${index + 1}.pdf`).replace(
+        /[^\w.-]+/g,
+        '-',
+      );
+      const filename = safeName.startsWith(`${folio}-`)
+        ? safeName
+        : `${folio}-CartaNoPapeleria-${safeName}`;
+      const uploaded = await this.uploadBuffer(
+        folder.id,
+        filename,
+        pdf.mime || 'application/pdf',
+        buffer,
+      );
+      files.push({
+        key: `cartaNoPapeleriaPdf:${index}`,
+        id: uploaded.id,
+        name: uploaded.name,
+        url: uploaded.webViewLink,
+      });
+    }
+
     if (tarjetaPdf?.dataBase64) {
       const buffer = this.bufferFromAttachment(tarjetaPdf);
       if (buffer) {
@@ -735,6 +786,38 @@ export class GoogleDriveService {
   }
 
   /** Busca un PDF de la venta en su carpeta de Drive. */
+  async findSalePdfsInFolder(
+    folderId: string,
+    nameContains: string,
+  ): Promise<{ id: string; name: string; url: string | null }[]> {
+    if (!this.drive || !folderId?.trim() || !nameContains.trim()) return [];
+    try {
+      const res = await this.drive.files.list({
+        q: [
+          `'${folderId}' in parents`,
+          `name contains '${nameContains.replace(/'/g, "\\'")}'`,
+          'trashed = false',
+        ].join(' and '),
+        fields: 'files(id, name, webViewLink)',
+        pageSize: 20,
+        supportsAllDrives: true,
+        includeItemsFromAllDrives: true,
+      });
+      return (res.data.files ?? [])
+        .filter((file) => file.id)
+        .map((file) => ({
+          id: file.id as string,
+          name: file.name ?? nameContains,
+          url: file.webViewLink ?? null,
+        }));
+    } catch (e) {
+      this.logger.warn(
+        `Drive list ${nameContains}: ${(e as Error).message}`,
+      );
+      return [];
+    }
+  }
+
   async findSalePdfInFolder(
     folderId: string,
     nameContains: string,

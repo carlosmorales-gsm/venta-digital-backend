@@ -185,6 +185,7 @@ export function saleToPublic(sale: Sale) {
     driveFolderPath: sale.driveFolderPath,
     correctionFields: parseCorrectionRequest(sale.correctionRequest).fields,
     tipoVenta: tipoVentaOf(sale),
+    funepet: Boolean(sale.funepet),
     recognizedBalance: recognizedFromVentas(sale.reconocimientoVentas),
     recognitionOriginIds: reconocimientoVentas
       .map((item: { id?: number }) => Number(item?.id) || 0)
@@ -392,6 +393,24 @@ export function saleToPayload(sale: Sale): Record<string, unknown> {
       reglamentoParqueFolletoPdf: findDoc(DocumentKind.REGLAMENTO_FOLLETO),
       cartaAutorizacionPdf: findDoc(DocumentKind.CARTA_AUTORIZACION),
       cartaNominaPdf: findDoc(DocumentKind.CARTA_NOMINA),
+      solicitudReconocimientoPdfs: docs
+        .filter((d) => d.kind === DocumentKind.CARTA_RECONOCIMIENTO)
+        .map((d) => ({
+          name: d.name,
+          mime: d.mime,
+          dataBase64: d.driveFileUrl ? '' : (d.dataBase64 ?? ''),
+          driveFileId: d.driveFileId ?? null,
+          driveFileUrl: d.driveFileUrl ?? null,
+        })),
+      cartaNoPapeleriaPdfs: docs
+        .filter((d) => d.kind === DocumentKind.CARTA_NO_PAPELERIA)
+        .map((d) => ({
+          name: d.name,
+          mime: d.mime,
+          dataBase64: d.driveFileUrl ? '' : (d.dataBase64 ?? ''),
+          driveFileId: d.driveFileId ?? null,
+          driveFileUrl: d.driveFileUrl ?? null,
+        })),
     },
   };
 }
@@ -527,6 +546,26 @@ export function saleToAuditSnapshot(sale: Sale): Record<string, unknown> {
   }
   if (docs.some((d) => d.kind === DocumentKind.CARTA_NOMINA)) {
     docLabels.push('Carta de consentimiento (nómina)');
+  }
+  const recognitionCount = docs.filter(
+    (d) => d.kind === DocumentKind.CARTA_RECONOCIMIENTO,
+  ).length;
+  if (recognitionCount) {
+    docLabels.push(
+      recognitionCount === 1
+        ? 'Solicitud de reconocimiento de saldo'
+        : `Solicitudes de reconocimiento de saldo (${recognitionCount})`,
+    );
+  }
+  const noStationeryCount = docs.filter(
+    (d) => d.kind === DocumentKind.CARTA_NO_PAPELERIA,
+  ).length;
+  if (noStationeryCount) {
+    docLabels.push(
+      noStationeryCount === 1
+        ? 'Carta de no papelería'
+        : `Cartas de no papelería (${noStationeryCount})`,
+    );
   }
   if (docs.some((d) => d.kind === DocumentKind.RECIBO_NOMINA)) {
     docLabels.push('Recibo de nómina más actual');

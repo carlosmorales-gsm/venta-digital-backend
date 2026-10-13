@@ -111,6 +111,7 @@ export class SaleDerechohabientesDto {
 export class ReconocimientoVentaDto {
   @IsOptional() @Type(() => Number) @IsInt() id?: number;
   @IsOptional() @IsString() folio?: string;
+  @IsOptional() @IsString() folioSolicitud?: string;
   @IsOptional() @Type(() => Number) @IsInt() partnerId?: number;
   @IsOptional() @IsString() partnerName?: string;
   @IsOptional() @IsString() dateOrder?: string;
@@ -369,6 +370,26 @@ export class SignSaleDto {
   @ValidateNested()
   @Type(() => SaleAttachmentDto)
   cartaNominaPdf?: SaleAttachmentDto | null;
+
+  /** Una solicitud FOR-GSM-CMR-08 por venta anterior seleccionada. */
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => SaleAttachmentDto)
+  solicitudReconocimientoPdfs?: SaleAttachmentDto[] | null;
+
+  /** Compatibilidad: un solo PDF si el cliente aún no manda el arreglo. */
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => SaleAttachmentDto)
+  solicitudReconocimientoPdf?: SaleAttachmentDto | null;
+
+  /** Una carta FOR-GSM-CMR-09 por venta anterior seleccionada. */
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => SaleAttachmentDto)
+  cartaNoPapeleriaPdfs?: SaleAttachmentDto[] | null;
 
   /** PDF de una hoja con frente y reverso de la tarjeta. */
   @IsOptional()
