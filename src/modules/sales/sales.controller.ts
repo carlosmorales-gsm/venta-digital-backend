@@ -84,6 +84,22 @@ export class SalesController {
     return this.salesService.getOne(id, user);
   }
 
+  /** Reenvía el expediente de una venta a Odoo. */
+  @Post(':id/sync')
+  @Roles(UserType.MONITOR, UserType.ADMIN)
+  sync(
+    @Param('id', ParseIntPipe) id: number,
+    @CurrentUser() user: AuthUserPayload,
+  ) {
+    if (
+      user.type !== UserType.ADMIN &&
+      !user.permissions.includes(PermissionCode.VENTAS_VER)
+    ) {
+      throw new ForbiddenException('No tiene permisos suficientes');
+    }
+    return this.salesService.syncSale(id, user);
+  }
+
   @Post('drafts')
   @Roles(UserType.VENDEDOR)
   createDraft(

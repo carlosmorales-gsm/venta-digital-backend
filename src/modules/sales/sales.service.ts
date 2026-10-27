@@ -257,6 +257,46 @@ export class SalesService {
     }
   }
 
+  /** Mesa de control reenvía el expediente de una venta a Odoo. */
+  async syncSale(id: number, user: AuthUserPayload) {
+    if (user.type !== UserType.ADMIN && user.type !== UserType.MONITOR) {
+      throw new ForbiddenException(
+        'Solo mesa de control puede sincronizar la venta',
+      );
+    }
+    const sale = await this.salesRepository.findById(id);
+    if (!sale) throw new NotFoundException('Venta no encontrada');
+    if (
+      sale.status === SaleStatus.DRAFT ||
+      sale.status === SaleStatus.REJECTED
+    ) {
+      throw new BadRequestException('Esta venta no se puede sincronizar');
+    }
+    const synced = await this.syncReceptionToOdoo(sale.id);
+    if (!synced.synced) {
+      throw new ServiceUnavailableException(
+        synced.error || 'No se pudo sincronizar el expediente en Odoo',
+      );
+    }
+    const actor = await this.usersRepository.findById(user.userId);
+    const titular =
+      sale.titularName ||
+      (sale.holder ? fullName(sale.holder) : '') ||
+      'sin titular';
+    await this.auditService.record({
+      actor: {
+        userId: user.userId,
+        fullName: actor?.fullName,
+        type: user.type,
+      },
+      action: AuditAction.UPDATE,
+      entityType: AuditEntityType.SALE,
+      entityId: sale.id,
+      summary: `Sincronizó expediente de venta #${sale.id} (${titular})`,
+    });
+    return { id: sale.id, synced: true };
+  }
+
   private hasOdooValidationIds(sale: Sale): boolean {
     return Number(sale.odooPartnerId) > 0 && Number(sale.odooSaleOrderId) > 0;
   }
