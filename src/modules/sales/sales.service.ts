@@ -180,7 +180,6 @@ export class SalesService {
       return null;
     }
     await this.ensureCaratulaFromDrive(sale);
-    await this.hydrateAllDocuments(sale);
     const publicSale = saleToPublic(sale);
     const payloadBody =
       publicSale.payload && typeof publicSale.payload === 'object'
@@ -200,6 +199,16 @@ export class SalesService {
     }
     const vdSellerName = (sale.sellerName || '').trim();
     const vdManagerName = (sale.nombreJefeVentas || '').trim();
+    const payload = {
+      ...payloadBody,
+      meta,
+      pago: {
+        ...pago,
+        nombreAsesor: '',
+        nombreJefeVentas: vdManagerName,
+      },
+    };
+    this.omitEmbeddedFilesForOdoo(payload);
     return {
       ...publicSale,
       tipoVenta: sale.funepet ? 'NUEVA' : publicSale.tipoVenta,
@@ -208,15 +217,44 @@ export class SalesService {
       vdSellerName,
       vdManagerName,
       funepet: Boolean(sale.funepet),
-      payload: {
-        ...payloadBody,
-        meta,
-        pago: {
-          ...pago,
-          nombreAsesor: '',
-          nombreJefeVentas: vdManagerName,
-        },
-      },
+      payload,
+    };
+  }
+
+  /**
+   * Odoo abre los archivos por su enlace de Drive. Mandar el base64
+   * (sobre todo si se rehidrató desde Drive) supera el límite del API y responde 413.
+   */
+  private omitEmbeddedFilesForOdoo(payload: Record<string, unknown>) {
+    const docs = payload.documentos;
+    if (!docs || typeof docs !== 'object') return;
+    const folder = docs as Record<string, unknown>;
+    for (const [key, value] of Object.entries(folder)) {
+      if (Array.isArray(value)) {
+        folder[key] = value.map((item) => this.driveLinkOnly(item));
+      } else {
+        folder[key] = this.driveLinkOnly(value);
+      }
+    }
+  }
+
+  private driveLinkOnly(value: unknown) {
+    if (!value || typeof value !== 'object') return value;
+    const doc = value as Record<string, unknown>;
+    if (!('dataBase64' in doc) && !('driveFileId' in doc) && !('driveFileUrl' in doc)) {
+      return value;
+    }
+    const driveFileId = String(doc.driveFileId || '').trim();
+    const driveFileUrl =
+      String(doc.driveFileUrl || '').trim() ||
+      (driveFileId
+        ? `https://drive.google.com/file/d/${driveFileId}/view`
+        : '');
+    return {
+      ...doc,
+      dataBase64: '',
+      driveFileId: driveFileId || null,
+      driveFileUrl: driveFileUrl || null,
     };
   }
 

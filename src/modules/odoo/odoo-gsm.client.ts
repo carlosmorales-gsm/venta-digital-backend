@@ -575,13 +575,16 @@ export class OdooGsmClient {
       }>('/expedientes/venta-digital', payload, { timeout: 120000 });
       return data;
     } catch (e: any) {
+      const status = e?.response?.status;
       const msg =
-        e?.response?.data?.message ||
-        (Array.isArray(e?.response?.data?.message)
-          ? e.response.data.message.join(', ')
-          : null) ||
-        e?.message ||
-        'No se pudo guardar el expediente en Odoo';
+        status === 413
+          ? 'Odoo rechazó el expediente porque el envío es demasiado grande'
+          : e?.response?.data?.message ||
+            (Array.isArray(e?.response?.data?.message)
+              ? e.response.data.message.join(', ')
+              : null) ||
+            e?.message ||
+            'No se pudo guardar el expediente en Odoo';
       this.logger.error(`syncVdReception: ${msg}`);
       throw new ServiceUnavailableException(
         typeof msg === 'string' ? msg : 'No se pudo guardar el expediente en Odoo',

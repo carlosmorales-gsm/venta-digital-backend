@@ -184,13 +184,19 @@ export class SalesController {
     ]);
   }
 
-  /** Reenvía el expediente a Odoo. Solo administrador, también si entró como vendedor. */
+  /** Reenvía el expediente a Odoo. Mesa de control, o el admin si entró como vendedor. */
   @Post(':id/sync')
   @Roles(UserType.VENDEDOR, UserType.MONITOR, UserType.ADMIN)
   syncSale(
     @Param('id', ParseIntPipe) id: number,
     @CurrentUser() user: AuthUserPayload,
   ) {
+    if (
+      user.type === UserType.MONITOR &&
+      !user.permissions.includes(PermissionCode.VENTAS_VER)
+    ) {
+      throw new ForbiddenException('No tiene permisos suficientes');
+    }
     return this.salesService.syncSaleForAdmin(id, user);
   }
 
