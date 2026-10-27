@@ -2394,27 +2394,94 @@ export class SalesService {
     return { ok: true };
   }
 
-  private clientSignToken(saleId: number): string {
+  /** Mesa pide una firma nueva en una venta ya firmada y manda el correo. */
+  async resendClientSignLink(
+    id: number,
+    user: AuthUserPayload,
+    frontCandidates?: Array<string | undefined>,
+  ) {
+    if (user.type !== UserType.ADMIN && user.type !== UserType.MONITOR) {
+      throw new ForbiddenException(
+        'Solo mesa de control puede reenviar la firma',
+      );
+    }
+    const sale = await this.salesRepository.findById(id);
+    if (!sale) throw new NotFoundException('Venta no encontrada');
+    if (!this.canResignStatus(sale.status)) {
+      throw new BadRequestException(
+        'Solo se puede reenviar la firma en pendiente de validación o completada',
+      );
+    }
+
+    const email = (sale.holder?.correo || '').trim();
+    if (!email) {
+      throw new BadRequestException(
+        'El titular no tiene correo para enviar el enlace de firma',
+      );
+    }
+
+    const titular =
+      sale.titularName ||
+      (sale.holder ? fullName(sale.holder) : '') ||
+      'Cliente';
+    await this.ticketNotifications.sendSignLink({
+      customerName: titular,
+      email,
+      signUrl: this.clientSignUrl(sale.id, frontCandidates, true),
+    });
+
+    const actor = await this.usersRepository.findById(user.userId);
+    await this.auditService.record({
+      actor: {
+        userId: user.userId,
+        fullName: actor?.fullName,
+        type: user.type,
+      },
+      action: AuditAction.UPDATE,
+      entityType: AuditEntityType.SALE,
+      entityId: sale.id,
+      summary: `Reenvió el correo de firma de la venta #${sale.id} (${titular})`,
+      details: { kind: 'email', correo: email },
+    });
+
+    return { ok: true };
+  }
+
+  private canResignStatus(status: string): boolean {
+    return (
+      status === SaleStatus.COMPLETED ||
+      status === SaleStatus.PENDING_VALIDATION ||
+      status === 'SUBMITTED'
+    );
+  }
+
+  private clientSignToken(saleId: number, resign = false): string {
     return this.jwt.sign(
-      { purpose: 'client-sign', saleId },
+      {
+        purpose: 'client-sign',
+        saleId,
+        ...(resign ? { resign: true } : {}),
+      },
       { expiresIn: '30d' },
     );
   }
 
-  private parseClientSignToken(raw: string): number {
+  private parseClientSignToken(raw: string): { saleId: number; resign: boolean } {
     const token = decodeURIComponent(String(raw || '').trim());
     if (!token) {
       throw new NotFoundException('Enlace de firma inválido o vencido');
     }
     try {
-      const payload = this.jwt.verify<{ purpose?: string; saleId?: number }>(
-        token,
-      );
+      const payload = this.jwt.verify<{
+        purpose?: string;
+        saleId?: number;
+        resign?: boolean;
+      }>(token);
       const saleId = Number(payload?.saleId);
       if (payload?.purpose !== 'client-sign' || !Number.isInteger(saleId) || saleId < 1) {
         throw new Error('bad payload');
       }
-      return saleId;
+      return { saleId, resign: payload.resign === true };
     } catch {
       throw new NotFoundException('Enlace de firma inválido o vencido');
     }
@@ -2452,15 +2519,23 @@ export class SalesService {
   private clientSignUrl(
     saleId: number,
     frontCandidates?: Array<string | undefined>,
+    resign = false,
   ): string {
     const front = this.resolveFrontBase(frontCandidates);
-    return `${front}/firmar/${encodeURIComponent(this.clientSignToken(saleId))}`;
+    return `${front}/firmar/${encodeURIComponent(this.clientSignToken(saleId, resign))}`;
   }
 
   async getForClientSign(token: string) {
-    const id = this.parseClientSignToken(token);
+    const { saleId: id, resign } = this.parseClientSignToken(token);
     const sale = await this.salesRepository.findByIdWithFiles(id);
     if (!sale) throw new NotFoundException('Enlace de firma inválido o vencido');
+    if (resign && this.canResignStatus(sale.status)) {
+      return {
+        ...saleToPublic(sale),
+        alreadySigned: false,
+        resign: true,
+      };
+    }
     if (
       sale.status === SaleStatus.COMPLETED ||
       sale.status === SaleStatus.PENDING_VALIDATION
@@ -2737,8 +2812,157 @@ export class SalesService {
   }
 
   async signSaleByClientToken(token: string, dto: SignSaleDto) {
-    const id = this.parseClientSignToken(token);
-    return this.signSale(id, null, dto, true);
+    const { saleId, resign } = this.parseClientSignToken(token);
+    if (resign) return this.resignSaleFromClient(saleId, dto);
+    return this.signSale(saleId, null, dto, true);
+  }
+
+  /** El titular vuelve a firmar. Se reemplazan los PDF y se conserva el estatus. */
+  private async resignSaleFromClient(id: number, dto: SignSaleDto) {
+    const sale = await this.salesRepository.findByIdWithFiles(id);
+    if (!sale) throw new NotFoundException('Venta no encontrada');
+    if (!this.canResignStatus(sale.status)) {
+      throw new BadRequestException(
+        'Esta venta ya no acepta una firma nueva',
+      );
+    }
+    if (!dto.firmaCliente?.dataBase64?.trim()) {
+      throw new BadRequestException('La firma es obligatoria');
+    }
+    if (!dto.caratulaPdf?.dataBase64?.trim()) {
+      throw new BadRequestException('No se generó la carátula');
+    }
+    if (!this.googleDrive.isEnabled()) {
+      throw new BadRequestException('Drive no está configurado');
+    }
+
+    let folderId = (sale.driveFolderId || '').trim();
+    if (!folderId) {
+      const folder = await this.googleDrive.ensureSaleFolder({
+        folio: String(sale.id),
+        titularName: sale.titularName,
+        fecha: sale.fecha,
+      });
+      folderId = folder.id;
+      sale.driveFolderId = folder.id;
+      sale.driveFolderUrl = folder.webViewLink;
+      sale.driveFolderPath = folder.name;
+      await this.salesRepository.saveWithoutDocuments(sale);
+    }
+
+    const docs = sale.documents ?? [];
+    sale.documents = docs;
+    const firma =
+      docs.find((doc) => doc.kind === DocumentKind.FIRMA) ?? new SaleDocument();
+    firma.kind = DocumentKind.FIRMA;
+    firma.saleId = sale.id;
+    firma.name = dto.firmaCliente.name || 'firma-cliente.png';
+    firma.mime = dto.firmaCliente.mime || 'image/png';
+    firma.dataBase64 = dto.firmaCliente.dataBase64;
+    if (!docs.includes(firma)) docs.push(firma);
+    const firmaBuffer = this.pdfBuffer(dto.firmaCliente.dataBase64);
+    if (firmaBuffer) {
+      const stored = await this.googleDrive.replaceSaleFile({
+        folderId,
+        fileName: `${sale.id}-FirmaCliente.png`,
+        mime: firma.mime,
+        buffer: firmaBuffer,
+        existingFileId: firma.driveFileId,
+      });
+      firma.driveFileId = stored.id;
+      firma.driveFileUrl = stored.url;
+    }
+    await this.salesRepository.saveDocument(firma);
+
+    const singles: Array<{
+      kind: DocumentKind;
+      fileName: string;
+      attachment?: { name?: string; mime?: string; dataBase64?: string } | null;
+    }> = [
+      {
+        kind: DocumentKind.CARATULA,
+        fileName: `${sale.id}-Caratula.pdf`,
+        attachment: dto.caratulaPdf,
+      },
+      {
+        kind: DocumentKind.CARTA_FACTURA,
+        fileName: `${sale.id}-CartaRequerimientoFactura.pdf`,
+        attachment: dto.cartaFacturaPdf,
+      },
+      {
+        kind: DocumentKind.CARTA_NO_FACTURA,
+        fileName: `${sale.id}-ConsentimientoNoFactura.pdf`,
+        attachment: dto.cartaNoFacturaPdf,
+      },
+      {
+        kind: DocumentKind.CARTA_EXCLUSIONES,
+        fileName: `${sale.id}-CartaAceptacionExclusiones.pdf`,
+        attachment: dto.cartaExclusionesPdf,
+      },
+      {
+        kind: DocumentKind.REGLAMENTO_PARQUE,
+        fileName: `${sale.id}-ReglamentoParque.pdf`,
+        attachment: dto.reglamentoParquePdf,
+      },
+      {
+        kind: DocumentKind.REGLAMENTO_FOLLETO,
+        fileName: `${sale.id}-ReglamentoParqueFolleto.pdf`,
+        attachment: dto.reglamentoParqueFolletoPdf,
+      },
+      {
+        kind: DocumentKind.CARTA_AUTORIZACION,
+        fileName: `${sale.id}-CartaAutorizacionCargoAutomatico.pdf`,
+        attachment: dto.cartaAutorizacionPdf,
+      },
+      {
+        kind: DocumentKind.CARTA_NOMINA,
+        fileName: `${sale.id}-CartaConsentimientoNomina.pdf`,
+        attachment: dto.cartaNominaPdf,
+      },
+    ];
+    for (const item of singles) {
+      await this.putSignDocument(
+        sale,
+        docs,
+        folderId,
+        item.kind,
+        item.fileName,
+        item.attachment,
+      );
+    }
+    await this.putIndexedSignDocuments(
+      sale,
+      docs,
+      folderId,
+      DocumentKind.CARTA_RECONOCIMIENTO,
+      'SolicitudReconocimientoSaldo',
+      dto.solicitudReconocimientoPdfs,
+    );
+    await this.putIndexedSignDocuments(
+      sale,
+      docs,
+      folderId,
+      DocumentKind.CARTA_NO_PAPELERIA,
+      'CartaNoPapeleria',
+      dto.cartaNoPapeleriaPdfs,
+    );
+
+    const titular =
+      sale.titularName || (sale.holder ? fullName(sale.holder) : '') || 'sin titular';
+    await this.auditService.record({
+      actor: {
+        userId: null,
+        fullName: titular,
+        type: 'CLIENTE',
+      },
+      action: AuditAction.UPDATE,
+      entityType: AuditEntityType.SALE,
+      entityId: sale.id,
+      summary: `El titular volvió a firmar la venta #${sale.id} (${titular})`,
+      details: { kind: 'note' },
+    });
+    void this.syncReceptionToOdoo(sale.id).catch(() => undefined);
+    return { id: sale.id, resigned: true };
   }
 
   async signSale(

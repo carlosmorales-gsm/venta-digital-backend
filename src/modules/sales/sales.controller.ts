@@ -167,6 +167,29 @@ export class SalesController {
     return this.salesService.savePayment(id, user, dto);
   }
 
+  /** Mesa reenvía el enlace para que el titular firme de nuevo. */
+  @Post(':id/resend-sign-link')
+  @Roles(UserType.MONITOR, UserType.ADMIN)
+  resendSignLink(
+    @Param('id', ParseIntPipe) id: number,
+    @CurrentUser() user: AuthUserPayload,
+    @Body() dto: SendSignLinkDto,
+    @Headers('origin') origin?: string,
+    @Headers('referer') referer?: string,
+  ) {
+    if (
+      user.type === UserType.MONITOR &&
+      !user.permissions.includes(PermissionCode.VENTAS_VER)
+    ) {
+      throw new ForbiddenException('No tiene permisos suficientes');
+    }
+    return this.salesService.resendClientSignLink(id, user, [
+      dto.frontUrl,
+      origin,
+      referer,
+    ]);
+  }
+
   /** Correo aparte del ticket, con el enlace para que el cliente firme. */
   @Post(':id/sign-link')
   @Roles(UserType.VENDEDOR)
