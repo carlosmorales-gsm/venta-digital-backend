@@ -25,6 +25,7 @@ import { UserType } from '../../common/enums/user-type.enum';
 import { PermissionCode } from '../../common/constants/permissions.constants';
 import {
   SavePaymentDto,
+  RefreshSignDocumentsDto,
   SignSaleDto,
   UpsertSaleDto,
 } from './dto/sale-form.dto';
@@ -46,6 +47,8 @@ export class SalesController {
     @Query('client') client?: string,
     @Query('q') query?: string,
     @Query('timeZone') timeZone?: string,
+    @Query('sellerId') sellerId?: string,
+    @Query('status') status?: string,
   ) {
     if (user.type === UserType.VENDEDOR) {
       return this.salesService.listOwnSales(user.userId, {
@@ -62,7 +65,18 @@ export class SalesController {
     ) {
       throw new ForbiddenException('No tiene permisos suficientes');
     }
-    return this.salesService.listAllSales();
+    const parsedSeller = Number(sellerId);
+    return this.salesService.listAllSales({
+      dateFrom,
+      dateTo,
+      sellerId:
+        Number.isFinite(parsedSeller) && parsedSeller > 0
+          ? parsedSeller
+          : undefined,
+      status,
+      client: (client || query || '').trim() || undefined,
+      timeZone,
+    });
   }
 
   /** Busca ventas de cualquier vendedor para precargar titular / contactos. */
@@ -170,6 +184,16 @@ export class SalesController {
     ]);
   }
 
+  /** Reenvía el expediente a Odoo. Solo administrador, también si entró como vendedor. */
+  @Post(':id/sync')
+  @Roles(UserType.VENDEDOR, UserType.MONITOR, UserType.ADMIN)
+  syncSale(
+    @Param('id', ParseIntPipe) id: number,
+    @CurrentUser() user: AuthUserPayload,
+  ) {
+    return this.salesService.syncSaleForAdmin(id, user);
+  }
+
   @Post(':id/correction')
   @Roles(UserType.VENDEDOR)
   submitCorrection(
@@ -178,6 +202,27 @@ export class SalesController {
     @Body() dto: SubmitCorrectionDto,
   ) {
     return this.salesService.submitSellerCorrection(id, user, dto.values);
+  }
+
+  /** Firma guardada, para volver a estampar los documentos. */
+  @Get(':id/firma')
+  @Roles(UserType.MONITOR, UserType.ADMIN)
+  signImage(
+    @Param('id', ParseIntPipe) id: number,
+    @CurrentUser() user: AuthUserPayload,
+  ) {
+    return this.salesService.signImageForRefresh(id, user);
+  }
+
+  /** Regenera carátula y cartas y reemplaza los PDF en Drive. */
+  @Post(':id/refresh-sign-documents')
+  @Roles(UserType.MONITOR, UserType.ADMIN)
+  refreshSignDocuments(
+    @Param('id', ParseIntPipe) id: number,
+    @CurrentUser() user: AuthUserPayload,
+    @Body() dto: RefreshSignDocumentsDto,
+  ) {
+    return this.salesService.refreshSignDocuments(id, user, dto);
   }
 
   @Post(':id/sign')

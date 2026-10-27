@@ -21,6 +21,7 @@ import { UserType } from '../../common/enums/user-type.enum';
 import { GoogleDriveService } from './google-drive.service';
 import { TicketNotificationService } from '../notifications/ticket-notification.service';
 import {
+  RefreshSignDocumentsDto,
   SavePaymentDto,
   SignSaleDto,
   UpsertSaleDto,
@@ -54,13 +55,16 @@ import {
 } from './utils/stamp-caratula-contrato';
 import { formatDigitalFolio } from './utils/digital-folio';
 import {
+  applyPlanCorrection,
   correctionCompanionKey,
   correctionFieldByKey,
   correctionFileTargets,
   displayCorrectionValue,
   expandCorrectionDocumentKeys,
   parseCorrectionRequest,
+  PLAN_CORRECTION_KEY,
   readPath,
+  summarizeCorrectionPlan,
   writePath,
 } from './correction-fields';
 import {
@@ -74,6 +78,10 @@ import {
 export class SalesService {
   private readonly logger = new Logger(SalesService.name);
   private readonly odooPushInflight = new Set<number>();
+  private monitorSellersCache: {
+    at: number;
+    rows: { id: number; name: string }[];
+  } | null = null;
   /** Vendedor y jefe ya enviados en esta ejecución del API. */
   private readonly odooPeopleSent = new Map<number, string>();
 
@@ -255,6 +263,42 @@ export class SalesService {
       );
       return { synced: false, error: msg };
     }
+  }
+
+  /** El administrador fuerza el envío del expediente, aunque ya se hubiera sincronizado. */
+  async syncSaleForAdmin(id: number, user: AuthUserPayload) {
+    const adminId =
+      user.type === UserType.ADMIN || user.type === UserType.MONITOR
+        ? user.userId
+        : Number(user.impersonatedBy) || 0;
+    if (!adminId) {
+      throw new ForbiddenException(
+        'Solo mesa de control puede sincronizar la venta',
+      );
+    }
+    const result = await this.syncReceptionToOdoo(id);
+    if (!result.synced) {
+      throw new BadRequestException(
+        result.error || 'No se pudo sincronizar la venta',
+      );
+    }
+    const admin = await this.usersRepository.findById(adminId);
+    const sale = await this.salesRepository.findById(id);
+    const titular = sale?.titularName?.trim() || 'sin titular';
+    await this.auditService.record({
+      actor: {
+        userId: adminId,
+        fullName: admin?.fullName,
+        type:
+          user.type === UserType.MONITOR ? UserType.MONITOR : UserType.ADMIN,
+      },
+      action: AuditAction.UPDATE,
+      entityType: AuditEntityType.SALE,
+      entityId: id,
+      summary: `Sincronizó la venta #${id} (${titular}) con Odoo`,
+      details: { kind: 'note' },
+    });
+    return { id, synced: true };
   }
 
   private hasOdooValidationIds(sale: Sale): boolean {
@@ -483,6 +527,16 @@ export class SalesService {
     if (asesor) sale.nombreAsesor = asesor;
     const jefe = (seller?.nombreJefeVentas ?? '').trim();
     if (jefe) sale.nombreJefeVentas = jefe;
+  }
+
+  /** El catálogo de vendedores no cambia en cada búsqueda. */
+  private async monitorSellerOptions() {
+    const now = Date.now();
+    const cached = this.monitorSellersCache;
+    if (cached && now - cached.at < 10 * 60 * 1000) return cached.rows;
+    const rows = await this.salesRepository.findMonitorSellerOptions();
+    this.monitorSellersCache = { at: now, rows };
+    return rows;
   }
 
   private async purgeExpired() {
@@ -785,23 +839,36 @@ export class SalesService {
     };
   }
 
-  async listAllSales() {
+  async listAllSales(filter?: {
+    dateFrom?: string;
+    dateTo?: string;
+    sellerId?: number;
+    status?: string;
+    client?: string;
+    timeZone?: string;
+  }) {
     await this.purgeExpired();
-    const items = await this.salesRepository.findForMonitor();
-    await this.pullOdooLinksIfMissing(items);
-    await this.refreshSignedStatuses(items);
-    void this.pushUnsyncedReceptionsToOdoo(items).catch((e) => {
-      this.logger.error(
-        `No se pudieron reenviar expedientes a Odoo: ${(e as Error).message}`,
-      );
+    const range = sellerListRange(
+      filter?.dateFrom,
+      filter?.dateTo,
+      filter?.timeZone,
+    );
+    const items = await this.salesRepository.findForMonitor({
+      createdFrom: range.from,
+      createdTo: range.to,
+      sellerId: filter?.sellerId,
+      statuses: monitorListStatuses(filter?.status),
+      client: filter?.client,
     });
+    const sellers = await this.monitorSellerOptions();
     return {
       scope: 'all' as const,
       items: items.map(saleToListItem),
+      sellers,
       total: items.length,
       message:
         items.length === 0
-          ? 'Aún no hay ventas registradas de vendedores'
+          ? 'No hay ventas con ese filtro'
           : 'Ventas de todos los vendedores',
     };
   }
@@ -1126,6 +1193,10 @@ export class SalesService {
 
     const beforeCorrection = saleToAuditSnapshot(sale);
     const payload = saleToPayload(sale) as unknown as Record<string, unknown>;
+    const pagoBefore = {
+      ...((readPath(payload, 'pago') ?? {}) as Record<string, unknown>),
+    };
+    let planReviewNext = '';
     const savedFileKeys = new Set(fileTargets.map((target) => target.saveKey));
     for (const target of fileTargets) {
       const file = values[target.saveKey] as {
@@ -1141,6 +1212,21 @@ export class SalesService {
     }
     for (const key of requested) {
       if (savedFileKeys.has(key) || correctionFileTargets([key]).some((t) => t.saveKey !== key)) {
+        continue;
+      }
+      if (key === PLAN_CORRECTION_KEY) {
+        if (!(key in (values || {}))) {
+          throw new BadRequestException('Selecciona un plan');
+        }
+        try {
+          planReviewNext = applyPlanCorrection(payload, values[key], {
+            funepet: sale.funepet,
+          });
+        } catch (error) {
+          throw new BadRequestException(
+            error instanceof Error ? error.message : 'Selecciona un plan',
+          );
+        }
         continue;
       }
       const def = correctionFieldByKey(key);
@@ -1161,7 +1247,7 @@ export class SalesService {
       previous: string;
       next: string;
     }> = [];
-    if (correctionTouchesFinance(requested)) {
+    if (correctionTouchesFinance(requested) && !planReviewNext) {
       const pago = (readPath(payload, 'pago') ?? {}) as Record<string, unknown>;
       const plan = (readPath(payload, 'ubicacionPlan') ?? {}) as Record<string, unknown>;
       const before = {
@@ -1259,6 +1345,37 @@ export class SalesService {
       }
     }
 
+    if (planReviewNext) {
+      const pagoAfter = (readPath(payload, 'pago') ?? {}) as Record<string, unknown>;
+      const financeLines: Array<{ key: string; label: string; money: boolean }> = [
+        { key: 'promocionDescuento', label: 'Plan y financiamiento · Descuento (%)', money: false },
+        { key: 'anticipo', label: 'Plan y financiamiento · Anticipo', money: true },
+        { key: 'frecuencia', label: 'Plan y financiamiento · Frecuencia', money: false },
+        { key: 'plazo', label: 'Plan y financiamiento · Plazo', money: false },
+        { key: 'saldo', label: 'Plan y financiamiento · Saldo', money: true },
+        { key: 'importeCadaPago', label: 'Plan y financiamiento · Importe de cada pago', money: true },
+        { key: 'pagoInicial', label: 'Plan y financiamiento · Pago inicial', money: true },
+        { key: 'fechaProximoPago', label: 'Plan y financiamiento · Próximo pago', money: false },
+        { key: 'diasEspecificosPago', label: 'Plan y financiamiento · Días específicos', money: false },
+      ];
+      for (const item of financeLines) {
+        const previous = String(pagoBefore[item.key] ?? '').trim();
+        const next = String(pagoAfter[item.key] ?? '').trim();
+        const changed = item.money
+          ? !sameMoney(previous, next)
+          : (previous || '—') !== (next || '—');
+        if (!changed) continue;
+        financeReview.push({
+          key: `pago.${item.key}`,
+          label: item.label,
+          previous: item.money
+            ? formatCorrectionMoney(previous)
+            : previous || '—',
+          next: item.money ? formatCorrectionMoney(next) : next || '—',
+        });
+      }
+    }
+
     applyPayloadToSale(sale, payload as never);
     const dropCombined = new Set<DocumentKind>();
     if (savedFileKeys.has('documentos.ineFrente') || savedFileKeys.has('documentos.ineReverso')) {
@@ -1282,9 +1399,12 @@ export class SalesService {
         .map((def) => {
           const key = def!.key;
           const overridden = financeNext.has(key);
-          const rawNext = overridden
-            ? financeNext.get(key) || ''
-            : displayCorrectionValue(values[key]);
+          const rawNext =
+            key === PLAN_CORRECTION_KEY
+              ? planReviewNext
+              : overridden
+                ? financeNext.get(key) || ''
+                : displayCorrectionValue(values[key]);
           const rawPrev = (request.previous[key] || '').trim();
           const asMoney = overridden && key === 'pago.pagoInicial';
           return {
@@ -1437,6 +1557,12 @@ export class SalesService {
     const previous = { ...existing };
     const payload = saleToPayload(sale);
     for (const key of keys) {
+      if (key === PLAN_CORRECTION_KEY) {
+        if ((previous[key] || '').trim()) continue;
+        previous[key] =
+          summarizeCorrectionPlan(readPath(payload, 'ubicacionPlan')) || '—';
+        continue;
+      }
       const def = correctionFieldByKey(key);
       if (!def || def.kind !== 'field') continue;
       if ((previous[key] || '').trim()) continue;
@@ -2316,6 +2442,262 @@ export class SalesService {
     return { ...saleToPublic(sale), alreadySigned: false };
   }
 
+  /** Imagen de la firma del cliente, aunque ya esté solo en Drive. */
+  async signImageForRefresh(id: number, user: AuthUserPayload) {
+    if (user.type === UserType.VENDEDOR) {
+      throw new ForbiddenException(
+        'Solo mesa de control puede actualizar los documentos',
+      );
+    }
+    const sale = await this.salesRepository.findByIdWithFiles(id);
+    if (!sale) throw new NotFoundException('Venta no encontrada');
+    await this.hydrateFirmaForPreview(sale);
+    const firma = (sale.documents ?? []).find(
+      (doc) => doc.kind === DocumentKind.FIRMA,
+    );
+    return {
+      dataBase64: firma?.dataBase64?.trim() || null,
+      mime: firma?.mime || 'image/png',
+    };
+  }
+
+  /** Mesa de control vuelve a generar los documentos a firmar y reemplaza los de Drive. */
+  async refreshSignDocuments(
+    id: number,
+    user: AuthUserPayload,
+    dto: RefreshSignDocumentsDto,
+  ) {
+    if (user.type === UserType.VENDEDOR) {
+      throw new ForbiddenException(
+        'Solo mesa de control puede actualizar los documentos',
+      );
+    }
+    if (!this.googleDrive.isEnabled()) {
+      throw new BadRequestException('Drive no está configurado');
+    }
+    const sale = await this.salesRepository.findByIdWithFiles(id);
+    if (!sale) throw new NotFoundException('Venta no encontrada');
+    if (
+      sale.status === SaleStatus.DRAFT ||
+      sale.status === SaleStatus.REJECTED
+    ) {
+      throw new BadRequestException(
+        'Esta venta no tiene documentos para actualizar',
+      );
+    }
+    if (!dto.caratulaPdf?.dataBase64?.trim()) {
+      throw new BadRequestException('No se generó la carátula');
+    }
+
+    let folderId = (sale.driveFolderId || '').trim();
+    if (!folderId) {
+      const folder = await this.googleDrive.ensureSaleFolder({
+        folio: String(sale.id),
+        titularName: sale.titularName,
+        fecha: sale.fecha,
+      });
+      folderId = folder.id;
+      sale.driveFolderId = folder.id;
+      sale.driveFolderUrl = folder.webViewLink;
+      sale.driveFolderPath = folder.name;
+      await this.salesRepository.saveWithoutDocuments(sale);
+    }
+
+    const docs = sale.documents ?? [];
+    sale.documents = docs;
+    const singles: Array<{
+      kind: DocumentKind;
+      fileName: string;
+      attachment?: { name?: string; mime?: string; dataBase64?: string } | null;
+    }> = [
+      {
+        kind: DocumentKind.CARATULA,
+        fileName: `${sale.id}-Caratula.pdf`,
+        attachment: dto.caratulaPdf,
+      },
+      {
+        kind: DocumentKind.CARTA_FACTURA,
+        fileName: `${sale.id}-CartaRequerimientoFactura.pdf`,
+        attachment: dto.cartaFacturaPdf,
+      },
+      {
+        kind: DocumentKind.CARTA_NO_FACTURA,
+        fileName: `${sale.id}-ConsentimientoNoFactura.pdf`,
+        attachment: dto.cartaNoFacturaPdf,
+      },
+      {
+        kind: DocumentKind.CARTA_EXCLUSIONES,
+        fileName: `${sale.id}-CartaAceptacionExclusiones.pdf`,
+        attachment: dto.cartaExclusionesPdf,
+      },
+      {
+        kind: DocumentKind.REGLAMENTO_PARQUE,
+        fileName: `${sale.id}-ReglamentoParque.pdf`,
+        attachment: dto.reglamentoParquePdf,
+      },
+      {
+        kind: DocumentKind.REGLAMENTO_FOLLETO,
+        fileName: `${sale.id}-ReglamentoParqueFolleto.pdf`,
+        attachment: dto.reglamentoParqueFolletoPdf,
+      },
+      {
+        kind: DocumentKind.CARTA_AUTORIZACION,
+        fileName: `${sale.id}-CartaAutorizacionCargoAutomatico.pdf`,
+        attachment: dto.cartaAutorizacionPdf,
+      },
+      {
+        kind: DocumentKind.CARTA_NOMINA,
+        fileName: `${sale.id}-CartaConsentimientoNomina.pdf`,
+        attachment: dto.cartaNominaPdf,
+      },
+    ];
+    for (const item of singles) {
+      await this.putSignDocument(
+        sale,
+        docs,
+        folderId,
+        item.kind,
+        item.fileName,
+        item.attachment,
+      );
+    }
+    await this.putIndexedSignDocuments(
+      sale,
+      docs,
+      folderId,
+      DocumentKind.CARTA_RECONOCIMIENTO,
+      'SolicitudReconocimientoSaldo',
+      dto.solicitudReconocimientoPdfs,
+    );
+    await this.putIndexedSignDocuments(
+      sale,
+      docs,
+      folderId,
+      DocumentKind.CARTA_NO_PAPELERIA,
+      'CartaNoPapeleria',
+      dto.cartaNoPapeleriaPdfs,
+    );
+
+    const actor = await this.usersRepository.findById(user.userId);
+    const titular = sale.titularName?.trim() || 'sin titular';
+    await this.auditService.record({
+      actor: {
+        userId: user.userId,
+        fullName: actor?.fullName,
+        type: user.type,
+      },
+      action: AuditAction.UPDATE,
+      entityType: AuditEntityType.SALE,
+      entityId: sale.id,
+      summary: `Actualizó los documentos a firmar de la venta #${sale.id} (${titular})`,
+      details: { kind: 'note' },
+    });
+    void this.syncReceptionToOdoo(sale.id).catch(() => undefined);
+    return { id: sale.id, refreshed: true };
+  }
+
+  private pdfBuffer(dataBase64?: string | null): Buffer | null {
+    const raw = dataBase64?.trim();
+    if (!raw) return null;
+    const buffer = Buffer.from(raw, 'base64');
+    return buffer.length ? buffer : null;
+  }
+
+  private async putSignDocument(
+    sale: Sale,
+    docs: SaleDocument[],
+    folderId: string,
+    kind: DocumentKind,
+    fileName: string,
+    attachment?: { name?: string; mime?: string; dataBase64?: string } | null,
+  ) {
+    const current = docs.filter((doc) => doc.kind === kind);
+    const buffer = this.pdfBuffer(attachment?.dataBase64);
+    if (!buffer) {
+      for (const doc of current) {
+        if (doc.driveFileId) await this.googleDrive.trashFile(doc.driveFileId);
+        await this.salesRepository.removeDocument(doc);
+        const index = docs.indexOf(doc);
+        if (index >= 0) docs.splice(index, 1);
+      }
+      return;
+    }
+    const stored = await this.googleDrive.replaceSaleFile({
+      folderId,
+      fileName,
+      mime: attachment?.mime || 'application/pdf',
+      buffer,
+      existingFileId: current[0]?.driveFileId,
+    });
+    const doc = current[0] ?? new SaleDocument();
+    doc.kind = kind;
+    doc.saleId = sale.id;
+    doc.name = stored.name || attachment?.name || fileName;
+    doc.mime = attachment?.mime || 'application/pdf';
+    doc.driveFileId = stored.id;
+    doc.driveFileUrl = stored.url;
+    doc.dataBase64 = null;
+    if (!current[0]) docs.push(doc);
+    await this.salesRepository.saveDocument(doc);
+    for (const extra of current.slice(1)) {
+      if (extra.driveFileId && extra.driveFileId !== stored.id) {
+        await this.googleDrive.trashFile(extra.driveFileId);
+      }
+      await this.salesRepository.removeDocument(extra);
+      const index = docs.indexOf(extra);
+      if (index >= 0) docs.splice(index, 1);
+    }
+  }
+
+  private async putIndexedSignDocuments(
+    sale: Sale,
+    docs: SaleDocument[],
+    folderId: string,
+    kind: DocumentKind,
+    filePrefix: string,
+    attachments?: Array<{ name?: string; mime?: string; dataBase64?: string }> | null,
+  ) {
+    const current = docs.filter((doc) => doc.kind === kind);
+    const incoming = (attachments ?? []).filter((item) =>
+      Boolean(item?.dataBase64?.trim()),
+    );
+    for (let i = 0; i < incoming.length; i += 1) {
+      const attachment = incoming[i];
+      const buffer = this.pdfBuffer(attachment.dataBase64);
+      if (!buffer) continue;
+      const safe = (attachment.name || `${filePrefix}-${i + 1}.pdf`).replace(
+        /[^\w.-]+/g,
+        '-',
+      );
+      const fileName = safe.startsWith(`${sale.id}-`)
+        ? safe
+        : `${sale.id}-${filePrefix}-${safe}`;
+      const stored = await this.googleDrive.replaceSaleFile({
+        folderId,
+        fileName,
+        mime: attachment.mime || 'application/pdf',
+        buffer,
+        existingFileId: current[i]?.driveFileId,
+      });
+      const doc = current[i] ?? new SaleDocument();
+      doc.kind = kind;
+      doc.saleId = sale.id;
+      doc.name = stored.name || fileName;
+      doc.mime = attachment.mime || 'application/pdf';
+      doc.driveFileId = stored.id;
+      doc.driveFileUrl = stored.url;
+      doc.dataBase64 = null;
+      if (!current[i]) docs.push(doc);
+      await this.salesRepository.saveDocument(doc);
+    }
+    for (const extra of current.slice(incoming.length)) {
+      if (extra.driveFileId) await this.googleDrive.trashFile(extra.driveFileId);
+      await this.salesRepository.removeDocument(extra);
+      const index = docs.indexOf(extra);
+      if (index >= 0) docs.splice(index, 1);
+    }
+  }
+
   async signSaleByClientToken(token: string, dto: SignSaleDto) {
     const id = this.parseClientSignToken(token);
     return this.signSale(id, null, dto, true);
@@ -2779,6 +3161,26 @@ export class SalesService {
   async submit(id: number | null, user: AuthUserPayload, dto: UpsertSaleDto) {
     return this.finalizeCapture(id, user, dto);
   }
+}
+
+const MONITOR_STATUSES = new Set<string>([
+  SaleStatus.COMPLETED,
+  SaleStatus.PENDING_VALIDATION,
+  SaleStatus.PENDING_CORRECTION,
+  SaleStatus.PENDING_CORRECTION_REVIEW,
+  SaleStatus.PENDING_SIGNATURE,
+  SaleStatus.PENDING_PAYMENT,
+  SaleStatus.REJECTED,
+  'SUBMITTED',
+]);
+
+function monitorListStatuses(status: string | undefined): string[] | undefined {
+  const value = (status || '').trim().toUpperCase();
+  if (!value || !MONITOR_STATUSES.has(value)) return undefined;
+  if (value === 'COMPLETED' || value === 'SUBMITTED') {
+    return [SaleStatus.COMPLETED, 'SUBMITTED'];
+  }
+  return [value];
 }
 
 /** Inicio inclusive y fin exclusivo del rango, en la zona del vendedor. */

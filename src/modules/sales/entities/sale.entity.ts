@@ -23,6 +23,7 @@ import { SaleDocument } from './sale-document.entity';
 @Entity({ name: 'sales' })
 @Index('IDX_sales_seller_updated', ['sellerId', 'updatedAt'])
 @Index('IDX_sales_status_updated', ['status', 'updatedAt'])
+@Index('IDX_sales_status_created', ['status', 'createdAt'])
 export class Sale {
   @PrimaryGeneratedColumn()
   id!: number;

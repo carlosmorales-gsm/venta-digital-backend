@@ -403,3 +403,58 @@ export class SignSaleDto {
   @Type(() => SaleAttachmentDto)
   inePdf?: SaleAttachmentDto | null;
 }
+
+/** Documentos a firmar regenerados. null quita el archivo anterior de Drive. */
+export class RefreshSignDocumentsDto {
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => SaleAttachmentDto)
+  caratulaPdf?: SaleAttachmentDto | null;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => SaleAttachmentDto)
+  cartaFacturaPdf?: SaleAttachmentDto | null;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => SaleAttachmentDto)
+  cartaNoFacturaPdf?: SaleAttachmentDto | null;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => SaleAttachmentDto)
+  cartaExclusionesPdf?: SaleAttachmentDto | null;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => SaleAttachmentDto)
+  reglamentoParquePdf?: SaleAttachmentDto | null;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => SaleAttachmentDto)
+  reglamentoParqueFolletoPdf?: SaleAttachmentDto | null;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => SaleAttachmentDto)
+  cartaAutorizacionPdf?: SaleAttachmentDto | null;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => SaleAttachmentDto)
+  cartaNominaPdf?: SaleAttachmentDto | null;
+
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => SaleAttachmentDto)
+  solicitudReconocimientoPdfs?: SaleAttachmentDto[] | null;
+
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => SaleAttachmentDto)
+  cartaNoPapeleriaPdfs?: SaleAttachmentDto[] | null;
+}

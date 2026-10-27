@@ -33,6 +33,14 @@ export type SellerSaleListFilter = {
   query?: string;
 };
 
+export type MonitorSaleListFilter = {
+  createdFrom?: Date;
+  createdTo?: Date;
+  sellerId?: number;
+  statuses?: string[];
+  client?: string;
+};
+
 function foldSearch(value: string | undefined): string {
   return (value || '')
     .normalize('NFD')
@@ -94,6 +102,10 @@ export class SalesRepository {
 
   saveDocument(doc: SaleDocument): Promise<SaleDocument> {
     return this.documents.save(doc);
+  }
+
+  removeDocument(doc: SaleDocument): Promise<SaleDocument> {
+    return this.documents.remove(doc);
   }
 
   /** Personas + docs: base64 solo si aún no está en Drive (o firma/ticket). */
@@ -201,11 +213,70 @@ export class SalesRepository {
     return qb.orderBy('s.updated_at', 'DESC').getMany();
   }
 
-  findForMonitor(): Promise<Sale[]> {
-    return this.repo.find({
-      where: { status: In(LIST_STATUSES) },
-      order: { updatedAt: 'DESC' },
-    });
+  findForMonitor(filter?: MonitorSaleListFilter): Promise<Sale[]> {
+    const statuses = filter?.statuses?.length ? filter.statuses : LIST_STATUSES;
+    const qb = this.repo
+      .createQueryBuilder('s')
+      .select([
+        's.id',
+        's.sellerId',
+        's.sellerName',
+        's.status',
+        's.amount',
+        's.titularName',
+        's.contrato',
+        's.odooPartnerId',
+        's.odooSaleOrderId',
+        's.odooReceptionSynced',
+        's.draftExpiresAt',
+        's.createdAt',
+        's.updatedAt',
+        's.driveFolderUrl',
+        's.driveFolderPath',
+        's.precioPlan',
+        's.promocionDescuento',
+        's.anticipo',
+        's.saldo',
+      ])
+      .where('s.status IN (:...statuses)', { statuses });
+
+    if (filter?.createdFrom) {
+      qb.andWhere('s.created_at >= :createdFrom', {
+        createdFrom: filter.createdFrom,
+      });
+    }
+    if (filter?.createdTo) {
+      qb.andWhere('s.created_at < :createdTo', { createdTo: filter.createdTo });
+    }
+    if (filter?.sellerId) {
+      qb.andWhere('s.seller_id = :sellerId', { sellerId: filter.sellerId });
+    }
+    const client = foldSearch(filter?.client);
+    if (client) {
+      qb.andWhere(`${FOLDED_NAME} LIKE :clientLike`, {
+        clientLike: `%${client}%`,
+      });
+    }
+
+    return qb.orderBy('s.updated_at', 'DESC').getMany();
+  }
+
+  /** Vendedores que tienen ventas, sin traer cada venta. */
+  async findMonitorSellerOptions(): Promise<{ id: number; name: string }[]> {
+    const rows = await this.repo
+      .createQueryBuilder('s')
+      .select('s.seller_id', 'id')
+      .addSelect('MAX(s.seller_name)', 'name')
+      .where('s.status IN (:...statuses)', { statuses: LIST_STATUSES })
+      .groupBy('s.seller_id')
+      .orderBy('MAX(s.seller_name)', 'ASC')
+      .getRawMany<{ id: string; name: string | null }>();
+    return rows
+      .map((row) => ({
+        id: Number(row.id),
+        name: (row.name || '').trim() || `Vendedor #${row.id}`,
+      }))
+      .filter((row) => Number.isFinite(row.id) && row.id > 0);
   }
 
   findForConciliation(): Promise<Sale[]> {

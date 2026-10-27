@@ -8,6 +8,7 @@ export interface JwtPayload {
   type: string;
   permissions: string[];
   tokenUse: 'access' | 'refresh';
+  impersonatedBy?: number;
 }
 
 @Injectable()
@@ -29,6 +30,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       userId: payload.sub,
       type: payload.type,
       permissions: payload.permissions ?? [],
+      impersonatedBy: payload.impersonatedBy,
     };
   }
 }

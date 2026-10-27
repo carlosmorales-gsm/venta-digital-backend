@@ -111,6 +111,8 @@ export const CORRECTION_FIELDS: CorrectionFieldDef[] = [
   field('segundo', '2.º contacto', 'segundoContacto.colonia', 'Colonia'),
   field('segundo', '2.º contacto', 'segundoContacto.cp', 'C.P.'),
 
+  field('plan', 'Plan y financiamiento', 'pago.fechaProximoPago', 'Fecha de primer pago'),
+  field('plan', 'Plan y financiamiento', 'ubicacionPlan.corregirPlan', 'Corregir plan'),
   field('plan', 'Plan', 'ubicacionPlan.nombrePlan', 'Plan'),
   field('plan', 'Plan', 'ubicacionPlan.parqueFuneral', 'Parque'),
   field('plan', 'Plan', 'ubicacionPlan.seccion', 'Sección'),
@@ -301,6 +303,114 @@ export function correctionCompanionKey(key: string): string | null {
   if (key === 'pago.empresaNomina') return 'pago.empresaNominaId';
   if (key.endsWith('.parentesco')) return key.replace(/parentesco$/, 'relationId');
   return null;
+}
+
+export const PLAN_CORRECTION_KEY = 'ubicacionPlan.corregirPlan';
+
+function correctionText(value: unknown): string {
+  return String(value ?? '').trim();
+}
+
+function correctionInt(value: unknown): number | null {
+  if (value == null || value === '') return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.trunc(parsed) : null;
+}
+
+/** Texto del plan para el comparativo de Odoo (anterior / nuevo). */
+export function summarizeCorrectionPlan(plan: unknown): string {
+  if (!plan || typeof plan !== 'object') return '';
+  const row = plan as Record<string, unknown>;
+  const name = correctionText(row.nombrePlan);
+  const kind = correctionText(row.planKind).toUpperCase();
+  const parts = [name];
+  if (kind === 'PARQUE') {
+    const location = [
+      correctionText(row.parqueFuneral),
+      correctionText(row.seccion),
+      row.preasignacion ? correctionText(row.cuadrante) : '',
+      row.preasignacion ? correctionText(row.numero) : '',
+    ].filter(Boolean);
+    if (location.length) parts.push(location.join(' · '));
+  } else {
+    const service = correctionText(row.servicioFunerario);
+    if (service) parts.push(service);
+  }
+  return parts.filter(Boolean).join(' — ');
+}
+
+/**
+ * Sustituye el plan de la venta por el que eligió el vendedor.
+ * Devuelve el texto que ve Mesa de Control.
+ */
+export function applyPlanCorrection(
+  payload: Record<string, unknown>,
+  incoming: unknown,
+  options?: { funepet?: boolean },
+): string {
+  if (!incoming || typeof incoming !== 'object' || Array.isArray(incoming)) {
+    throw new Error('Selecciona un plan');
+  }
+  const src = incoming as Record<string, unknown>;
+  let kind = correctionText(src.planKind).toUpperCase() === 'PARQUE' ? 'PARQUE' : 'PLAN_FUTURO';
+  if (options?.funepet) kind = 'PLAN_FUTURO';
+  const productId = correctionInt(src.productId);
+  const nombrePlan = correctionText(src.nombrePlan);
+  if (!nombrePlan || !productId) throw new Error('Selecciona un plan');
+  const preasignacion = kind === 'PARQUE' && Boolean(src.preasignacion);
+  const parqueFuneral = correctionText(src.parqueFuneral);
+  const seccion = correctionText(src.seccion);
+  const servicio = correctionText(src.servicioFunerario);
+  if (kind === 'PARQUE') {
+    if (!parqueFuneral || !seccion) throw new Error('Selecciona parque y sección');
+    if (preasignacion && (!correctionText(src.cuadrante) || !correctionText(src.numero))) {
+      throw new Error('Selecciona la ubicación del parque');
+    }
+  } else if (!servicio) {
+    throw new Error('Indica el servicio funerario');
+  }
+  const current = (readPath(payload, 'ubicacionPlan') ?? {}) as Record<string, unknown>;
+  const next: Record<string, unknown> = {
+    ...current,
+    planKind: kind,
+    nombrePlan,
+    productId,
+    productDefaultCode: correctionText(src.productDefaultCode),
+    precioPlan: correctionText(src.precioPlan),
+    withoutInterest: Boolean(src.withoutInterest),
+    servicioFunerario: kind === 'PLAN_FUTURO' ? servicio : '',
+    preasignacion,
+    parqueFuneral: kind === 'PARQUE' ? parqueFuneral : '',
+    seccion: kind === 'PARQUE' ? seccion : '',
+    cuadrante: preasignacion ? correctionText(src.cuadrante) : '',
+    numero: preasignacion ? correctionText(src.numero) : '',
+    parkId: kind === 'PARQUE' ? correctionInt(src.parkId) : null,
+    sectionId: kind === 'PARQUE' ? correctionInt(src.sectionId) : null,
+    quadrantId: preasignacion ? correctionInt(src.quadrantId) : null,
+    spaceId: preasignacion ? correctionInt(src.spaceId) : null,
+  };
+  writePath(payload, 'ubicacionPlan', next);
+  const pago = (readPath(payload, 'pago') ?? {}) as Record<string, unknown>;
+  const nextPago: Record<string, unknown> = { ...pago };
+  if (correctionText(next.precioPlan)) nextPago.precioPlan = next.precioPlan;
+  const finance = src.financiamiento;
+  if (finance && typeof finance === 'object' && !Array.isArray(finance)) {
+    const row = finance as Record<string, unknown>;
+    nextPago.promocionDescuento = correctionText(row.promocionDescuento);
+    nextPago.anticipo = correctionText(row.anticipo);
+    nextPago.frecuencia = correctionText(row.frecuencia);
+    nextPago.plazo = correctionText(row.plazo);
+    nextPago.pagoInicial = correctionText(row.pagoInicial);
+    nextPago.saldo = correctionText(row.saldo);
+    nextPago.importeCadaPago = correctionText(row.importeCadaPago);
+    nextPago.fechaProximoPago = correctionText(row.fechaProximoPago).slice(0, 10);
+    nextPago.diasEspecificosPago = correctionText(row.diasEspecificosPago);
+    if (correctionText(row.frecuencia).toUpperCase() === 'CONTADO') {
+      writePath(payload, 'contacto.tipoCobranza', 'OTRO');
+    }
+  }
+  writePath(payload, 'pago', nextPago);
+  return summarizeCorrectionPlan(next);
 }
 
 export function displayCorrectionValue(value: unknown): string {

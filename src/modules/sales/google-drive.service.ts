@@ -411,6 +411,78 @@ export class GoogleDriveService {
     };
   }
 
+  /** Carpeta de la venta. Reutiliza la ruta AÑO/MES/DÍA si ya existe. */
+  async ensureSaleFolder(params: {
+    folio: number | string;
+    titularName: string | null;
+    fecha?: string | Date | null;
+  }) {
+    return this.createSaleFolder(params);
+  }
+
+  async trashFile(fileId: string): Promise<void> {
+    if (!this.drive || !fileId.trim()) return;
+    try {
+      await this.drive.files.update({
+        fileId,
+        requestBody: { trashed: true },
+        supportsAllDrives: true,
+      });
+    } catch (e) {
+      this.logger.warn(
+        `Drive: no se pudo enviar a la papelera ${fileId}: ${(e as Error).message}`,
+      );
+    }
+  }
+
+  /**
+   * Sustituye un PDF de la venta. Si ya hay archivo, conserva el id.
+   * Los duplicados del mismo nombre se van a la papelera.
+   */
+  async replaceSaleFile(params: {
+    folderId: string;
+    fileName: string;
+    mime: string;
+    buffer: Buffer;
+    existingFileId?: string | null;
+  }): Promise<{ id: string; name: string; url: string | null }> {
+    const mime = params.mime || 'application/pdf';
+    const existingId = (params.existingFileId || '').trim();
+    if (existingId) {
+      try {
+        return await this.updateFileBuffer(existingId, mime, params.buffer);
+      } catch (e) {
+        this.logger.warn(
+          `Drive: no se pudo reemplazar ${existingId}: ${(e as Error).message}`,
+        );
+      }
+    }
+    const hint = params.fileName.replace(/\.pdf$/i, '');
+    const found = await this.findSalePdfsInFolder(params.folderId, hint);
+    if (found.length) {
+      const [first, ...rest] = found;
+      const updated = await this.updateFileBuffer(first.id, mime, params.buffer);
+      for (const extra of rest) await this.trashFile(extra.id);
+      return {
+        id: updated.id,
+        name: updated.name || first.name,
+        url: updated.url,
+      };
+    }
+    const created = await this.uploadBuffer(
+      params.folderId,
+      params.fileName,
+      mime,
+      params.buffer,
+    );
+    await this.shareAnyoneReader(created.id);
+    return {
+      id: created.id,
+      name: created.name,
+      url: created.webViewLink,
+    };
+  }
+
   /** Reemplaza el contenido de un archivo existente (mismo id / enlace). */
   async updateFileBuffer(
     fileId: string,
