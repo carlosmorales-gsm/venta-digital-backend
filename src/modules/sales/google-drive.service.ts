@@ -528,6 +528,7 @@ export class GoogleDriveService {
     cartaNominaPdf?: DriveAttachment | null;
     solicitudReconocimientoPdfs?: DriveAttachment[] | null;
     cartaNoPapeleriaPdfs?: DriveAttachment[] | null;
+    solicitudCancelacionPdfs?: DriveAttachment[] | null;
     tarjetaPdf?: DriveAttachment | null;
     inePdf?: DriveAttachment | null;
   }): Promise<{
@@ -553,6 +554,7 @@ export class GoogleDriveService {
       cartaNominaPdf,
       solicitudReconocimientoPdfs,
       cartaNoPapeleriaPdfs,
+      solicitudCancelacionPdfs,
       tarjetaPdf,
       inePdf,
     } = params;
@@ -793,6 +795,31 @@ export class GoogleDriveService {
       );
       files.push({
         key: `cartaNoPapeleriaPdf:${index}`,
+        id: uploaded.id,
+        name: uploaded.name,
+        url: uploaded.webViewLink,
+      });
+    }
+
+    for (const [index, pdf] of (solicitudCancelacionPdfs ?? []).entries()) {
+      if (!pdf?.dataBase64) continue;
+      const buffer = this.bufferFromAttachment(pdf);
+      if (!buffer) continue;
+      const safeName = (pdf.name || `cancelacion-${index + 1}.pdf`).replace(
+        /[^\w.-]+/g,
+        '-',
+      );
+      const filename = safeName.startsWith(`${folio}-`)
+        ? safeName
+        : `${folio}-SolicitudCancelacionContrato-${safeName}`;
+      const uploaded = await this.uploadBuffer(
+        folder.id,
+        filename,
+        pdf.mime || 'application/pdf',
+        buffer,
+      );
+      files.push({
+        key: `solicitudCancelacionPdf:${index}`,
         id: uploaded.id,
         name: uploaded.name,
         url: uploaded.webViewLink,

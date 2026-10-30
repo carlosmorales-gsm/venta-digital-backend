@@ -79,6 +79,19 @@ export class OdooController {
     return this.odoo.listMascotaTamanos();
   }
 
+  @Get('ordenes/empresas')
+  @Roles(UserType.VENDEDOR, UserType.MONITOR, UserType.ADMIN)
+  listOrderCompanies(@Query('ids') ids?: string) {
+    const parsed = String(ids || '')
+      .split(',')
+      .map((value) => Number(value.trim()))
+      .filter((id) => Number.isFinite(id) && id > 0);
+    if (!parsed.length) {
+      throw new BadRequestException('Indica las ventas (ids)');
+    }
+    return this.odoo.listOrderCompanies(parsed);
+  }
+
   @Get('clientes')
   @Roles(UserType.VENDEDOR, UserType.MONITOR, UserType.ADMIN)
   searchClientes(@Query('q') q?: string, @Query('limit') limit?: string) {

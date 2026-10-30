@@ -120,6 +120,9 @@ export class ReconocimientoVentaDto {
   @IsOptional() @Type(() => Number) paidAmount?: number;
   @IsOptional() @IsString() matchType?: string;
   @IsOptional() @IsString() matchedBeneficiaryName?: string;
+  /** res.company de esa cotización (1 Parque · 2 Plan a futuro). */
+  @IsOptional() @Type(() => Number) @IsInt() companyId?: number;
+  @IsOptional() @IsString() companyName?: string;
 }
 
 export class SaleMetaDto {
@@ -391,6 +394,13 @@ export class SignSaleDto {
   @Type(() => SaleAttachmentDto)
   cartaNoPapeleriaPdfs?: SaleAttachmentDto[] | null;
 
+  /** Una solicitud de cancelación por venta anterior seleccionada. */
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => SaleAttachmentDto)
+  solicitudCancelacionPdfs?: SaleAttachmentDto[] | null;
+
   /** PDF de una hoja con frente y reverso de la tarjeta. */
   @IsOptional()
   @ValidateNested()
@@ -457,4 +467,10 @@ export class RefreshSignDocumentsDto {
   @ValidateNested({ each: true })
   @Type(() => SaleAttachmentDto)
   cartaNoPapeleriaPdfs?: SaleAttachmentDto[] | null;
+
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => SaleAttachmentDto)
+  solicitudCancelacionPdfs?: SaleAttachmentDto[] | null;
 }

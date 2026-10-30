@@ -411,6 +411,15 @@ export function saleToPayload(sale: Sale): Record<string, unknown> {
           driveFileId: d.driveFileId ?? null,
           driveFileUrl: d.driveFileUrl ?? null,
         })),
+      solicitudCancelacionPdfs: docs
+        .filter((d) => d.kind === DocumentKind.CARTA_CANCELACION)
+        .map((d) => ({
+          name: d.name,
+          mime: d.mime,
+          dataBase64: d.driveFileUrl ? '' : (d.dataBase64 ?? ''),
+          driveFileId: d.driveFileId ?? null,
+          driveFileUrl: d.driveFileUrl ?? null,
+        })),
     },
   };
 }
@@ -565,6 +574,16 @@ export function saleToAuditSnapshot(sale: Sale): Record<string, unknown> {
       noStationeryCount === 1
         ? 'Carta de no papelería'
         : `Cartas de no papelería (${noStationeryCount})`,
+    );
+  }
+  const cancellationCount = docs.filter(
+    (d) => d.kind === DocumentKind.CARTA_CANCELACION,
+  ).length;
+  if (cancellationCount) {
+    docLabels.push(
+      cancellationCount === 1
+        ? 'Solicitud de cancelación de contrato'
+        : `Solicitudes de cancelación de contrato (${cancellationCount})`,
     );
   }
   if (docs.some((d) => d.kind === DocumentKind.RECIBO_NOMINA)) {

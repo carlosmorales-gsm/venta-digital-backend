@@ -19,6 +19,8 @@ export enum DocumentKind {
   CARTA_RECONOCIMIENTO = 'CARTA_RECONOCIMIENTO',
   /** FOR-GSM-CMR-09. Cabe en varchar(20) de sale_documents.kind. */
   CARTA_NO_PAPELERIA = 'CARTA_NO_PAPELERIA',
+  /** Solicitud de cancelación. 17 caracteres: cabe en varchar(20). */
+  CARTA_CANCELACION = 'CARTA_CANCELACION',
   RECIBO_NOMINA = 'RECIBO_NOMINA',
   BANORTE_DOM = 'BANORTE_DOM',
   TARJETA_FRENTE = 'TARJETA_FRENTE',

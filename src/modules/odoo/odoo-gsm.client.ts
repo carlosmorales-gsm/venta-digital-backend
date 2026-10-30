@@ -475,6 +475,31 @@ export class OdooGsmClient {
     return this.listClienteVentas(id, 'activas');
   }
 
+  async listOrderCompanies(ids: number[]) {
+    if (!this.http) {
+      throw new ServiceUnavailableException(
+        'Búsqueda de clientes no configurada',
+      );
+    }
+    const clean = [...new Set(ids.filter((id) => id > 0))].slice(0, 50);
+    if (!clean.length) return [];
+    try {
+      const { data } = await this.http.get('/clientes/ordenes/empresas', {
+        params: { ids: clean.join(',') },
+      });
+      return Array.isArray(data) ? data : [];
+    } catch (e: any) {
+      const msg =
+        e?.response?.data?.message ||
+        e?.message ||
+        'No se pudo leer la empresa de la venta';
+      this.logger.error(`listOrderCompanies: ${msg}`);
+      throw new ServiceUnavailableException(
+        typeof msg === 'string' ? msg : 'No se pudo leer la empresa de la venta',
+      );
+    }
+  }
+
   private async listClienteVentas(
     id: number,
     kind: 'suspendidas' | 'activas',

@@ -1023,6 +1023,39 @@ export class SalesService {
     }
   }
 
+  private async attachOriginCompanies(sale: Sale) {
+    const ventas = parseReconocimientoVentas(sale.reconocimientoVentas);
+    const missing = ventas.filter(
+      (item) => Number(item?.id) > 0 && !Number(item?.companyId),
+    );
+    if (!missing.length) return;
+    let rows: { id?: number; companyId?: number; companyName?: string }[] = [];
+    try {
+      rows = await this.odooGsm.listOrderCompanies(
+        missing.map((item) => Number(item.id)),
+      );
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : 'sin detalle';
+      this.logger.warn(
+        `Empresa de ventas origen #${sale.id} no se pudo leer: ${msg}`,
+      );
+      return;
+    }
+    const byId = new Map(rows.map((row) => [Number(row.id), row]));
+    let changed = false;
+    for (const venta of ventas) {
+      const found = byId.get(Number(venta?.id));
+      const companyId = Number(found?.companyId);
+      if (!companyId) continue;
+      venta.companyId = companyId;
+      venta.companyName = String(found?.companyName ?? '');
+      changed = true;
+    }
+    if (!changed) return;
+    sale.reconocimientoVentas = JSON.stringify(ventas);
+    await this.salesRepository.saveWithoutDocuments(sale);
+  }
+
   async getOne(id: number, user: AuthUserPayload) {
     await this.purgeExpired();
     const sale = await this.salesRepository.findById(id);
@@ -1040,6 +1073,7 @@ export class SalesService {
     }
 
     await this.hydrateFirmaForPreview(sale);
+    await this.attachOriginCompanies(sale);
     return saleToPublic(sale);
   }
 
@@ -2529,6 +2563,7 @@ export class SalesService {
     const { saleId: id, resign } = this.parseClientSignToken(token);
     const sale = await this.salesRepository.findByIdWithFiles(id);
     if (!sale) throw new NotFoundException('Enlace de firma inválido o vencido');
+    await this.attachOriginCompanies(sale);
     if (resign && this.canResignStatus(sale.status)) {
       return {
         ...saleToPublic(sale),
@@ -2689,6 +2724,14 @@ export class SalesService {
       DocumentKind.CARTA_NO_PAPELERIA,
       'CartaNoPapeleria',
       dto.cartaNoPapeleriaPdfs,
+    );
+    await this.putIndexedSignDocuments(
+      sale,
+      docs,
+      folderId,
+      DocumentKind.CARTA_CANCELACION,
+      'SolicitudCancelacionContrato',
+      dto.solicitudCancelacionPdfs,
     );
 
     const actor = await this.usersRepository.findById(user.userId);
@@ -2946,6 +2989,14 @@ export class SalesService {
       'CartaNoPapeleria',
       dto.cartaNoPapeleriaPdfs,
     );
+    await this.putIndexedSignDocuments(
+      sale,
+      docs,
+      folderId,
+      DocumentKind.CARTA_CANCELACION,
+      'SolicitudCancelacionContrato',
+      dto.solicitudCancelacionPdfs,
+    );
 
     const titular =
       sale.titularName || (sale.holder ? fullName(sale.holder) : '') || 'sin titular';
@@ -3166,6 +3217,29 @@ export class SalesService {
       });
     }
 
+    const cancellationIncoming = Array.isArray(dto.solicitudCancelacionPdfs)
+      ? dto.solicitudCancelacionPdfs
+      : null;
+    const cancellationPdfs = (cancellationIncoming ?? []).filter(
+      (pdf) => pdf?.dataBase64,
+    );
+    if (cancellationIncoming) {
+      for (let i = docs.length - 1; i >= 0; i -= 1) {
+        if (docs[i]?.kind === DocumentKind.CARTA_CANCELACION) docs.splice(i, 1);
+      }
+      cancellationPdfs.forEach((pdf, index) => {
+        const letter = new SaleDocument();
+        letter.kind = DocumentKind.CARTA_CANCELACION;
+        letter.name =
+          pdf.name || `${sale.id}-SolicitudCancelacionContrato-${index + 1}.pdf`;
+        letter.mime = pdf.mime || 'application/pdf';
+        letter.dataBase64 = pdf.dataBase64 ?? null;
+        letter.driveFileId = null;
+        letter.driveFileUrl = null;
+        docs.push(letter);
+      });
+    }
+
     if (dto.tarjetaPdf?.dataBase64) {
       const prevCard = docs.find((d) => d.kind === DocumentKind.TARJETA);
       const cardDoc = prevCard ?? new SaleDocument();
@@ -3248,6 +3322,7 @@ export class SalesService {
           cartaNominaPdf: dto.cartaNominaPdf ?? null,
           solicitudReconocimientoPdfs: recognitionPdfs,
           cartaNoPapeleriaPdfs: noStationeryPdfs,
+          solicitudCancelacionPdfs: cancellationPdfs,
           tarjetaPdf: dto.tarjetaPdf ?? docAtt(DocumentKind.TARJETA),
           inePdf: dto.inePdf ?? docAtt(DocumentKind.INE),
         });
@@ -3258,6 +3333,9 @@ export class SalesService {
         for (const file of driveInfo.files) {
           const reconMatch = /^solicitudReconocimientoPdf:(\d+)$/.exec(file.key);
           const noStationeryMatch = /^cartaNoPapeleriaPdf:(\d+)$/.exec(file.key);
+          const cancellationMatch = /^solicitudCancelacionPdf:(\d+)$/.exec(
+            file.key,
+          );
           const indexed = reconMatch
             ? {
                 kind: DocumentKind.CARTA_RECONOCIMIENTO,
@@ -3268,7 +3346,12 @@ export class SalesService {
                   kind: DocumentKind.CARTA_NO_PAPELERIA,
                   index: Number(noStationeryMatch[1]),
                 }
-              : null;
+              : cancellationMatch
+                ? {
+                    kind: DocumentKind.CARTA_CANCELACION,
+                    index: Number(cancellationMatch[1]),
+                  }
+                : null;
           if (indexed) {
             const indexedDocs = docs.filter((d) => d.kind === indexed.kind);
             const indexedDoc = indexedDocs[indexed.index];
