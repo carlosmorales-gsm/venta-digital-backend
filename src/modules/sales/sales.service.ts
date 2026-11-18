@@ -668,8 +668,11 @@ export class SalesService {
       }
     }
 
-    const wantsInvoice =
-      (payload.contacto?.factura || '').trim().toUpperCase() === 'SI';
+    const factura = (payload.contacto?.factura || '').trim().toUpperCase();
+    if (factura !== 'SI' && factura !== 'NO') {
+      throw new BadRequestException('Indica si la venta lleva factura');
+    }
+    const wantsInvoice = factura === 'SI';
     if (wantsInvoice) {
       const c = payload.contacto ?? {};
       const tipo = (c.tipoPersona || '').trim().toUpperCase();

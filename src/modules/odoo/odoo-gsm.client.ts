@@ -364,6 +364,31 @@ export class OdooGsmClient {
     }
   }
 
+  async listSaleOrigins() {
+    if (!this.http) {
+      throw new ServiceUnavailableException(
+        'Integración Odoo no configurada (API_ODOO_GSM_URL)',
+      );
+    }
+    try {
+      const { data } = await this.http.get<
+        Array<{ code: string; name: string; sequence?: number }>
+      >('/productos/origenes-venta');
+      return Array.isArray(data) ? data : [];
+    } catch (e: any) {
+      const msg =
+        e?.response?.data?.message ||
+        e?.message ||
+        'Error al consultar orígenes de venta en Odoo';
+      this.logger.error(`listSaleOrigins: ${msg}`);
+      throw new ServiceUnavailableException(
+        typeof msg === 'string'
+          ? msg
+          : 'Error al consultar orígenes de venta en Odoo',
+      );
+    }
+  }
+
   async listBranches() {
     if (!this.http) {
       throw new ServiceUnavailableException(

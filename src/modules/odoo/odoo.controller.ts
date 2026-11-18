@@ -119,6 +119,12 @@ export class OdooController {
     return this.odoo.getCliente(id);
   }
 
+  @Get('origenes-venta')
+  @Roles(UserType.VENDEDOR, UserType.MONITOR, UserType.ADMIN)
+  listOrigenesVenta() {
+    return this.odoo.listSaleOrigins();
+  }
+
   @Get('sucursales')
   @Roles(UserType.VENDEDOR, UserType.MONITOR, UserType.ADMIN)
   listSucursales() {
