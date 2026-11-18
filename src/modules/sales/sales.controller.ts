@@ -23,6 +23,7 @@ import { RolesGuard } from '../../common/guards/roles.guard';
 import { PermissionsGuard } from '../../common/guards/permissions.guard';
 import { UserType } from '../../common/enums/user-type.enum';
 import { PermissionCode } from '../../common/constants/permissions.constants';
+import { UsersService } from '../users/users.service';
 import {
   SavePaymentDto,
   RefreshSignDocumentsDto,
@@ -35,7 +36,10 @@ import { SendSignLinkDto } from './dto/send-sign-link.dto';
 @Controller('sales')
 @UseGuards(AuthGuard('jwt'), RolesGuard, PermissionsGuard)
 export class SalesController {
-  constructor(private readonly salesService: SalesService) {}
+  constructor(
+    private readonly salesService: SalesService,
+    private readonly usersService: UsersService,
+  ) {}
 
   /** Listado: el JWT define el alcance (vendedor = propias, mesa = global). */
   @Get()
@@ -77,6 +81,25 @@ export class SalesController {
       client: (client || query || '').trim() || undefined,
       timeZone,
     });
+  }
+
+  /** Indicadores de Inicio. Solo el administrador con el check activo. */
+  @Get('dashboard')
+  @Roles(UserType.ADMIN)
+  async dashboard(
+    @CurrentUser() user: AuthUserPayload,
+    @Query('dateFrom') dateFrom?: string,
+    @Query('dateTo') dateTo?: string,
+    @Query('timeZone') timeZone?: string,
+  ) {
+    const fresh = await this.usersService.findById(user.userId);
+    if (
+      fresh.type !== UserType.ADMIN ||
+      !fresh.permissions.includes(PermissionCode.DASHBOARD_VER)
+    ) {
+      throw new ForbiddenException('No tiene permisos suficientes');
+    }
+    return this.salesService.dashboard({ dateFrom, dateTo, timeZone });
   }
 
   /** Busca ventas de cualquier vendedor para precargar titular / contactos. */

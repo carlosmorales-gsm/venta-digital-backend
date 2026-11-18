@@ -8,6 +8,7 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { SalesRepository } from './repositories/sales.repository';
+import { buildDashboard } from './dashboard';
 import { SaleStatus } from './enums/sale-status.enum';
 import { DocumentKind } from './enums/document-kind.enum';
 import { UsersRepository } from '../users/repositories/users.repository';
@@ -912,6 +913,26 @@ export class SalesService {
           ? 'No hay ventas con ese filtro'
           : 'Ventas de todos los vendedores',
     };
+  }
+
+  /** Indicadores del inicio. No incluye borradores. */
+  async dashboard(filter?: {
+    dateFrom?: string;
+    dateTo?: string;
+    timeZone?: string;
+  }) {
+    await this.purgeExpired();
+    const zone = filter?.timeZone?.trim() || 'America/Mexico_City';
+    const range = sellerListRange(filter?.dateFrom, filter?.dateTo, zone);
+    const rows = await this.salesRepository.dashboardRows({
+      createdFrom: range.from,
+      createdTo: range.to,
+    });
+    return buildDashboard(rows, {
+      dateFrom: filter?.dateFrom || '',
+      dateTo: filter?.dateTo || '',
+      timeZone: zone,
+    });
   }
 
   /** Listado liviano para integraciones Odoo (sin adjuntos/base64). */

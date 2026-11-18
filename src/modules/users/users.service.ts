@@ -15,6 +15,7 @@ import {
   DEFAULT_ADMIN_PERMISSIONS,
   DEFAULT_MONITOR_PERMISSIONS,
   PERMISSION_CATALOG,
+  PermissionCode,
 } from '../../common/constants/permissions.constants';
 import { UsersRepository } from './repositories/users.repository';
 import { SellerDefaultsRepository } from './repositories/seller-defaults.repository';
@@ -202,6 +203,10 @@ export class UsersService implements OnModuleInit {
       user.nombreJefeVentas = null;
     }
     await this.usersRepository.save(user);
+
+    if (user.type === UserType.ADMIN && dto.verIndicadores !== undefined) {
+      await this.syncIndicadoresPermission(user.id, dto.verIndicadores);
+    }
 
     const updated = await this.findById(id);
     const after = this.toAuditSnapshot(updated);
@@ -418,13 +423,36 @@ export class UsersService implements OnModuleInit {
       return dto.permissionCodes;
     }
     if (dto.type === UserType.ADMIN) {
-      return [...DEFAULT_ADMIN_PERMISSIONS];
+      const codes = [...DEFAULT_ADMIN_PERMISSIONS];
+      if (dto.verIndicadores === true) return codes;
+      return codes.filter((code) => code !== PermissionCode.DASHBOARD_VER);
     }
     if (dto.type === UserType.MONITOR) {
       return [...DEFAULT_MONITOR_PERMISSIONS];
     }
     // Vendedor: sin permisos de menú monitor; accede a sus ventas por rol.
     return [];
+  }
+
+  private async syncIndicadoresPermission(userId: number, enabled: boolean) {
+    const full = await this.usersRepository.findByIdWithPermissions(userId);
+    if (!full || full.type !== UserType.ADMIN) return;
+
+    const has = (full.userPermissions ?? []).some(
+      (row) => row.permission?.code === PermissionCode.DASHBOARD_VER,
+    );
+    if (has === enabled) return;
+
+    const permission = await this.permissionsRepository.findByCode(
+      PermissionCode.DASHBOARD_VER,
+    );
+    if (!permission) return;
+
+    if (enabled) {
+      await this.userPermissionsRepository.assign(full, permission);
+      return;
+    }
+    await this.userPermissionsRepository.revoke(full.id, permission.id);
   }
 
   private async assignPermissions(user: User, codes: string[]) {

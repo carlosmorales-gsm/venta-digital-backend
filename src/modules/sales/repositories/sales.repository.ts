@@ -261,6 +261,74 @@ export class SalesRepository {
     return qb.orderBy('s.updated_at', 'DESC').getMany();
   }
 
+  /** Filas ligeras para los indicadores de Inicio. Sin documentos. */
+  async dashboardRows(filter?: {
+    createdFrom?: Date;
+    createdTo?: Date;
+  }): Promise<
+    Array<{
+      status: string;
+      sellerName: string | null;
+      origen: string | null;
+      planKind: string | null;
+      funepet: boolean | null;
+      estatus: string | null;
+      branchName: string | null;
+      synced: boolean | null;
+      quoteId: number | null;
+      createdAt: Date | string;
+      amount: string | null;
+      precioPlan: string | null;
+      anticipo: string | null;
+      saldo: string | null;
+    }>
+  > {
+    const qb = this.repo
+      .createQueryBuilder('s')
+      .select('s.status', 'status')
+      .addSelect('s.seller_name', 'sellerName')
+      .addSelect('s.origen_venta', 'origen')
+      .addSelect('s.plan_kind', 'planKind')
+      .addSelect('s.funepet', 'funepet')
+      .addSelect('s.estatus', 'estatus')
+      .addSelect('s.branch_name', 'branchName')
+      .addSelect('s.odoo_reception_synced', 'synced')
+      .addSelect('s.odoo_sale_order_id', 'quoteId')
+      .addSelect('s.created_at', 'createdAt')
+      .addSelect('s.amount', 'amount')
+      .addSelect('s.precio_plan', 'precioPlan')
+      .addSelect('s.anticipo', 'anticipo')
+      .addSelect('s.saldo', 'saldo')
+      .where('s.status IN (:...statuses)', { statuses: LIST_STATUSES });
+    if (filter?.createdFrom) {
+      qb.andWhere('s.created_at >= :createdFrom', {
+        createdFrom: filter.createdFrom,
+      });
+    }
+    if (filter?.createdTo) {
+      qb.andWhere('s.created_at < :createdTo', { createdTo: filter.createdTo });
+    }
+    const rows = await qb.getRawMany<Record<string, unknown>>();
+    const pick = (row: Record<string, unknown>, key: string) =>
+      row[key] ?? row[key.toLowerCase()];
+    return rows.map((row) => ({
+      status: String(pick(row, 'status') ?? ''),
+      sellerName: (pick(row, 'sellerName') as string | null) ?? null,
+      origen: (pick(row, 'origen') as string | null) ?? null,
+      planKind: (pick(row, 'planKind') as string | null) ?? null,
+      funepet: (pick(row, 'funepet') as boolean | null) ?? null,
+      estatus: (pick(row, 'estatus') as string | null) ?? null,
+      branchName: (pick(row, 'branchName') as string | null) ?? null,
+      synced: (pick(row, 'synced') as boolean | null) ?? null,
+      quoteId: (pick(row, 'quoteId') as number | null) ?? null,
+      createdAt: (pick(row, 'createdAt') as Date | string) ?? '',
+      amount: (pick(row, 'amount') as string | null) ?? null,
+      precioPlan: (pick(row, 'precioPlan') as string | null) ?? null,
+      anticipo: (pick(row, 'anticipo') as string | null) ?? null,
+      saldo: (pick(row, 'saldo') as string | null) ?? null,
+    }));
+  }
+
   /** Vendedores que tienen ventas, sin traer cada venta. */
   async findMonitorSellerOptions(): Promise<{ id: number; name: string }[]> {
     const rows = await this.repo

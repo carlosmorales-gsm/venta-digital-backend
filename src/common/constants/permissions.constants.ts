@@ -14,7 +14,6 @@ export type PermissionCodeType =
 
 /** Permisos que se asignan automáticamente a un MONITOR nuevo. */
 export const DEFAULT_MONITOR_PERMISSIONS: PermissionCodeType[] = [
-  PermissionCode.DASHBOARD_VER,
   PermissionCode.VENTAS_VER,
   PermissionCode.REPORTES_VER,
 ];
@@ -35,8 +34,9 @@ export const PERMISSION_CATALOG: Array<{
 }> = [
   {
     code: PermissionCode.DASHBOARD_VER,
-    name: 'Ver panel',
-    description: 'Acceso al menú principal del monitor',
+    name: 'Ver indicadores',
+    description:
+      'Pantalla de Inicio con los gráficos de ventas. Se activa con el check del administrador',
   },
   {
     code: PermissionCode.VENTAS_VER,

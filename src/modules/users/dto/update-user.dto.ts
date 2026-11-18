@@ -42,4 +42,9 @@ export class UpdateUserDto {
   @IsString()
   @MaxLength(120)
   nombreJefeVentas?: string;
+
+  /** Solo ADMIN: muestra la pantalla de Inicio con los indicadores. */
+  @IsOptional()
+  @IsBoolean()
+  verIndicadores?: boolean;
 }

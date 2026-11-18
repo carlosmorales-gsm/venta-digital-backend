@@ -16,4 +16,14 @@ export class UserPermissionsRepository {
   assign(user: User, permission: Permission): Promise<UserPermission> {
     return this.repo.save(this.repo.create({ user, permission }));
   }
+
+  revoke(userId: number, permissionId: number): Promise<void> {
+    return this.repo
+      .createQueryBuilder()
+      .delete()
+      .where('user_id = :userId', { userId })
+      .andWhere('permission_id = :permissionId', { permissionId })
+      .execute()
+      .then(() => undefined);
+  }
 }

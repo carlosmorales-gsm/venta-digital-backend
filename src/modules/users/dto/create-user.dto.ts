@@ -55,6 +55,11 @@ export class CreateUserDto {
   @IsString({ each: true })
   permissionCodes?: string[];
 
+  /** Solo ADMIN: muestra la pantalla de Inicio con los indicadores. */
+  @IsOptional()
+  @IsBoolean()
+  verIndicadores?: boolean;
+
   /** Solo VENDEDOR: nombre que sale en la carátula del contrato. */
   @ValidateIf((o) => o.type === UserType.VENDEDOR)
   @IsOptional()
